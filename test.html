@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Test — Blackview Portal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #0F172A; color: #E2E8F0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+        .card { background: #1E293B; border-radius: 16px; padding: 3rem 2.5rem; max-width: 560px; width: 100%; box-shadow: 0 25px 60px rgba(0,0,0,.5); text-align: center; }
+        .status-icon { font-size: 4rem; margin-bottom: 1rem; }
+        h1 { font-size: 1.75rem; font-weight: 700; color: #F1F5F9; margin-bottom: .5rem; }
+        .subtitle { color: #94A3B8; font-size: .95rem; margin-bottom: 2rem; }
+        .checks { text-align: left; background: #0F172A; border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+        .check-item { display: flex; align-items: center; gap: .75rem; padding: .5rem 0; border-bottom: 1px solid #1E293B; font-size: .9rem; }
+        .check-item:last-child { border-bottom: none; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+        .dot-green  { background: #22C55E; box-shadow: 0 0 6px #22C55E; }
+        .dot-yellow { background: #EAB308; box-shadow: 0 0 6px #EAB308; }
+        .check-label { color: #CBD5E1; }
+        .check-value { margin-left: auto; color: #94A3B8; font-size: .8rem; font-family: monospace; }
+        .divider { height: 1px; background: #334155; margin: 1.5rem 0; }
+        .next-step { background: #172554; border: 1px solid #1D4ED8; border-radius: 8px; padding: 1rem 1.25rem; text-align: left; }
+        .next-step h3 { font-size: .85rem; font-weight: 700; color: #93C5FD; margin-bottom: .5rem; letter-spacing: .04em; text-transform: uppercase; }
+        .next-step p  { font-size: .84rem; color: #BFDBFE; line-height: 1.6; }
+        .next-step code { background: #1E3A8A; padding: .1rem .35rem; border-radius: 4px; font-size: .8rem; }
+        .footer { margin-top: 2rem; font-size: .75rem; color: #475569; }
+        .badge { display: inline-block; padding: .2rem .6rem; border-radius: 20px; font-size: .72rem; font-weight: 700; background: #22C55E22; color: #22C55E; border: 1px solid #22C55E44; }
+    </style>
+</head>
+<body>
+<div class="card">
+
+    <div class="status-icon">✅</div>
+    <h1>Web Server is Working</h1>
+    <p class="subtitle">Static HTML is being served correctly. <span class="badge">ONLINE</span></p>
+
+    <div class="checks">
+        <div class="check-item">
+            <div class="dot dot-green"></div>
+            <span class="check-label">Apache / Web Server</span>
+            <span class="check-value">Responding</span>
+        </div>
+        <div class="check-item">
+            <div class="dot dot-green"></div>
+            <span class="check-label">Static HTML</span>
+            <span class="check-value">Serving correctly</span>
+        </div>
+        <div class="check-item">
+            <div class="dot dot-green"></div>
+            <span class="check-label">CSS &amp; Styling</span>
+            <span class="check-value">Rendering</span>
+        </div>
+        <div class="check-item">
+            <div class="dot dot-green"></div>
+            <span class="check-label">JavaScript</span>
+            <span id="js-check" class="check-value">Checking…</span>
+        </div>
+        <div class="check-item">
+            <div class="dot dot-yellow"></div>
+            <span class="check-label">PHP</span>
+            <span class="check-value">Not tested here — use test.php</span>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="next-step">
+        <h3>Next Step — Test PHP</h3>
+        <p>If this page loads but the portal still fails, the issue is PHP.<br>
+        Upload <code>test.php</code> to the same folder and open it in your browser to check PHP and the database connection.</p>
+    </div>
+
+    <div class="footer">
+        Blackview SA Portal &mdash; Server Diagnostic &mdash; <span id="ts"></span>
+    </div>
+
+</div>
+
+<script>
+    document.getElementById('js-check').textContent = 'Working ✓';
+    document.getElementById('ts').textContent = new Date().toLocaleString('en-ZA');
+</script>
+</body>
+</html>

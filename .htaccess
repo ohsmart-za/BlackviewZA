@@ -1,0 +1,43 @@
+# ============================================================
+# Blackview SA Portal — Apache Configuration
+# ============================================================
+
+Options -Indexes
+ServerSignature Off
+
+# ---- Default document ----
+DirectoryIndex index.php index.html
+
+# ---- Protect sensitive files/folders ----
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^config(/|$) - [F,L]
+    RewriteRule ^database(/|$) - [F,L]
+</IfModule>
+
+<FilesMatch "\.(sql|log|env|sh|bak)$">
+    Order Allow,Deny
+    Deny from all
+</FilesMatch>
+
+# ---- Security headers ----
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+</IfModule>
+
+# ---- Compression ----
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css application/javascript
+</IfModule>
+
+# ---- Cache static assets ----
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType image/png  "access plus 7 days"
+    ExpiresByType image/jpeg "access plus 7 days"
+    ExpiresByType image/avif "access plus 7 days"
+    ExpiresByType image/webp "access plus 7 days"
+    ExpiresByType text/css   "access plus 1 day"
+    ExpiresByType application/javascript "access plus 1 day"
+</IfModule>
