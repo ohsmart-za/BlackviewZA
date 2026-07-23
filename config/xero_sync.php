@@ -79,41 +79,9 @@ class XeroSync
         )->fetchAll();
 
         foreach ($rows as $r) {
-            try {
-                // Xero requires unique Name — business customers use company name.
-                $xeroName = ($r['company_name'] ?? '') !== '' ? $r['company_name'] : $r['name'];
-                $payload  = ['Name' => $xeroName];
-                if (($r['email'] ?? '') !== '') $payload['EmailAddress'] = $r['email'];
-                if (($r['vat_no'] ?? '') !== '') $payload['TaxNumber'] = $r['vat_no'];
-                if (($r['phone'] ?? '') !== '') {
-                    $payload['Phones'] = [['PhoneType' => 'DEFAULT', 'PhoneNumber' => $r['phone']]];
-                }
-                if (($r['address'] ?? '') !== '') {
-                    $payload['Addresses'] = [['AddressType' => 'STREET', 'AddressLine1' => mb_substr($r['address'], 0, 500)]];
-                }
-                if (($r['company_name'] ?? '') !== '' && $r['name'] !== $r['company_name']) {
-                    $parts = explode(' ', trim($r['name']), 2);
-                    $payload['ContactPersons'] = [[
-                        'FirstName' => $parts[0],
-                        'LastName'  => $parts[1] ?? '',
-                        'EmailAddress' => $r['email'] ?: null,
-                        'IncludeInEmails' => true,
-                    ]];
-                }
-                if ($r['xero_id']) $payload['ContactID'] = $r['xero_id'];
-
-                $saved = XeroClient::post('Contacts', ['Contacts' => [$payload]]);
-                $c = $saved['Contacts'][0] ?? null;
-                if (!$c) throw new RuntimeException('Xero did not return the saved contact');
-
-                $pdo->prepare("UPDATE customers SET xero_id = :xid, xero_synced_at = NOW() WHERE id = :id")
-                    ->execute([':xid' => $c['ContactID'], ':id' => $r['id']]);
-                self::log('push', 'customer', $r['id'], $c['ContactID'], $r['xero_id'] ? 'update' : 'create', 'ok', $xeroName);
-                $s['pushed_customers']++;
-            } catch (Throwable $e) {
-                $s['errors']++;
-                self::log('push', 'customer', $r['id'], $r['xero_id'], 'error', 'error', $e->getMessage());
-            }
+            $xid = self::pushOneCustomer($r);
+            if ($xid) $s['pushed_customers']++;
+            else      $s['errors']++;
         }
     }
 
@@ -460,24 +428,72 @@ class XeroSync
         return self::$ensuredItems[$code];
     }
 
-    /** Push a single customer row to Xero, returning its ContactID (throws on failure). */
-    private static function pushOneCustomer(array $r): string {
+    /**
+     * Push a single customer to Xero, returning its ContactID or null on failure.
+     * Robust: sanitises the payload, and if the Name is already taken in Xero it
+     * links to that existing contact instead of erroring (Xero Names must be unique).
+     */
+    private static function pushOneCustomer(array $r): ?string {
         $pdo = getDB();
-        $xeroName = ($r['company_name'] ?? '') !== '' ? $r['company_name'] : $r['name'];
-        $payload  = ['Name' => $xeroName];
-        if (($r['email'] ?? '') !== '')  $payload['EmailAddress'] = $r['email'];
-        if (($r['vat_no'] ?? '') !== '') $payload['TaxNumber'] = $r['vat_no'];
-        if (($r['phone'] ?? '') !== '')  $payload['Phones'] = [['PhoneType' => 'DEFAULT', 'PhoneNumber' => $r['phone']]];
+        // Xero requires a unique, non-empty Contact Name. Business → company name.
+        $xeroName = trim(($r['company_name'] ?? '') !== '' ? $r['company_name'] : ($r['name'] ?? ''));
+        if ($xeroName === '') {
+            self::log('push', 'customer', (int)$r['id'], null, 'skip', 'ok', 'Blank name — cannot push to Xero');
+            return null;
+        }
+
+        $payload = ['Name' => mb_substr($xeroName, 0, 255)];
+        $email = trim($r['email'] ?? '');
+        if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) $payload['EmailAddress'] = $email;
+        if (($r['vat_no'] ?? '') !== '') $payload['TaxNumber'] = mb_substr($r['vat_no'], 0, 50);
+        if (($r['phone'] ?? '') !== '')  $payload['Phones'] = [['PhoneType' => 'DEFAULT', 'PhoneNumber' => mb_substr($r['phone'], 0, 50)]];
         if (($r['address'] ?? '') !== '') $payload['Addresses'] = [['AddressType' => 'STREET', 'AddressLine1' => mb_substr($r['address'], 0, 500)]];
+        if (($r['company_name'] ?? '') !== '' && ($r['name'] ?? '') !== $r['company_name'] && trim($r['name'] ?? '') !== '') {
+            $parts = explode(' ', trim($r['name']), 2);
+            $payload['ContactPersons'] = [[
+                'FirstName'       => mb_substr($parts[0], 0, 50),
+                'LastName'        => mb_substr($parts[1] ?? '', 0, 50),
+                'IncludeInEmails' => true,
+            ]];
+        }
         if (!empty($r['xero_id'])) $payload['ContactID'] = $r['xero_id'];
 
-        $saved = XeroClient::post('Contacts', ['Contacts' => [$payload]]);
-        $c = $saved['Contacts'][0] ?? null;
-        if (!$c) throw new RuntimeException('Xero did not return the saved contact');
+        $xid = null;
+        $logged = false;
+        try {
+            $saved = XeroClient::post('Contacts', ['Contacts' => [$payload]]);
+            $xid = $saved['Contacts'][0]['ContactID'] ?? null;
+            if (!$xid) throw new RuntimeException('Xero did not return the saved contact');
+        } catch (Throwable $e) {
+            // Name already exists in Xero → link to that contact instead of failing.
+            $existing = self::findXeroContactByName($xeroName);
+            if ($existing) {
+                $xid = $existing;
+                self::log('push', 'customer', (int)$r['id'], $xid, 'link', 'ok', "Linked to existing Xero contact: $xeroName");
+                $logged = true;
+            } else {
+                self::log('push', 'customer', (int)$r['id'], $r['xero_id'] ?? null, 'error', 'error', $e->getMessage());
+                return null;
+            }
+        }
+
         $pdo->prepare("UPDATE customers SET xero_id = :x, xero_synced_at = NOW() WHERE id = :id")
-            ->execute([':x' => $c['ContactID'], ':id' => $r['id']]);
-        self::log('push', 'customer', (int)$r['id'], $c['ContactID'], $r['xero_id'] ? 'update' : 'create', 'ok', $xeroName);
-        return $c['ContactID'];
+            ->execute([':x' => $xid, ':id' => $r['id']]);
+        if (!$logged) {
+            self::log('push', 'customer', (int)$r['id'], $xid, !empty($r['xero_id']) ? 'update' : 'create', 'ok', $xeroName);
+        }
+        return $xid;
+    }
+
+    /** Look up a Xero contact by exact Name; returns its ContactID or null. */
+    private static function findXeroContactByName(string $name): ?string {
+        try {
+            $safe = str_replace('"', '', $name);
+            $res  = XeroClient::get('Contacts', ['where' => 'Name=="' . $safe . '"']);
+            return $res['Contacts'][0]['ContactID'] ?? null;
+        } catch (Throwable $e) {
+            return null;
+        }
     }
 
     private static function pullInvoices(array &$s): void {

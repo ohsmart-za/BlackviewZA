@@ -84,9 +84,19 @@ class XeroClient
         if ($resp === false) throw new RuntimeException("Xero request failed ($endpoint): $err");
         $decoded = json_decode($resp, true);
         if ($code < 200 || $code >= 300) {
-            $msg = is_array($decoded)
-                ? ($decoded['Message'] ?? ($decoded['Elements'][0]['ValidationErrors'][0]['Message'] ?? $resp))
-                : $resp;
+            // Prefer the specific per-element validation errors over the generic top-level Message.
+            $msg = '';
+            if (is_array($decoded)) {
+                $ve = [];
+                foreach ($decoded['Elements'] ?? [] as $el) {
+                    foreach ($el['ValidationErrors'] ?? [] as $v) {
+                        if (!empty($v['Message'])) $ve[] = $v['Message'];
+                    }
+                }
+                $msg = $ve ? implode('; ', array_unique($ve)) : ($decoded['Message'] ?? $resp);
+            } else {
+                $msg = $resp;
+            }
             throw new RuntimeException("Xero API $code on $endpoint: " . substr((string)$msg, 0, 500));
         }
         return is_array($decoded) ? $decoded : [];
