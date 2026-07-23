@@ -36,7 +36,7 @@ try {
 // ============================================================
 // Active tab
 // ============================================================
-$activeTab = (isset($_GET['tab']) && $_GET['tab'] === 'takeout') ? 'takeout' : 'pos';
+$activeTab = (isset($_GET['tab']) && in_array($_GET['tab'], ['takeout','xero'], true)) ? $_GET['tab'] : 'pos';
 
 // ============================================================
 // POS Invoices — filters & query
@@ -145,6 +145,25 @@ if ($hasXeroCols) {
         $xeroConnected = (bool)$pdo->query("SELECT 1 FROM xero_oauth_tokens WHERE id=1 AND refresh_token IS NOT NULL")->fetchColumn();
     } catch (Throwable $e) { /* not migrated */ }
 }
+
+// ============================================================
+// Xero-only invoices (created directly in Xero, mirrored for the portal)
+// ============================================================
+$xeroOnlyInvoices = [];
+$xeroOnlyTotal    = 0;
+try {
+    $xoStmt = $pdo->query(
+        "SELECT m.invoice_no, m.reference, m.status, m.doc_date, m.due_date,
+                m.total, m.amount_due, c.name AS customer_name
+         FROM xero_invoices_mirror m
+         LEFT JOIN customers c ON c.id = m.customer_id
+         WHERE m.status NOT IN ('DELETED','VOIDED')
+         ORDER BY m.doc_date DESC, m.id DESC
+         LIMIT 200"
+    );
+    $xeroOnlyInvoices = $xoStmt->fetchAll();
+    $xeroOnlyTotal    = array_sum(array_map(fn($x) => (float)$x['total'], $xeroOnlyInvoices));
+} catch (Throwable $e) { /* mirror table not present */ }
 
 // ============================================================
 // Take-Out Movements — filters & query
@@ -261,6 +280,15 @@ require_once __DIR__ . '/../includes/header.php';
             <span class="badge" style="margin-left:.35rem;"><?= number_format($toTotalRows) ?></span>
         <?php endif; ?>
     </button>
+    <?php if (!empty($xeroOnlyInvoices)): ?>
+    <button type="button" id="tab-btn-xero"
+            class="tab-btn <?= $activeTab === 'xero' ? 'active' : '' ?>"
+            onclick="switchTab('xero')"
+            style="padding:.5rem 1.25rem;font-weight:600;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;color:var(--color-muted);">
+        Xero-Only Invoices
+        <span class="badge" style="margin-left:.35rem;background:#E0F2FE;color:#0369A1;"><?= number_format(count($xeroOnlyInvoices)) ?></span>
+    </button>
+    <?php endif; ?>
 </div>
 
 <!-- ============================================================
@@ -679,6 +707,74 @@ require_once __DIR__ . '/../includes/header.php';
     </div>
 
 </div><!-- /#panel-takeout -->
+
+<!-- ============================================================
+     TAB PANEL: XERO-ONLY INVOICES
+     ============================================================ -->
+<?php if (!empty($xeroOnlyInvoices)): ?>
+<div id="panel-xero" class="tab-panel" style="display:<?= $activeTab === 'xero' ? 'block' : 'none' ?>;">
+    <div class="card">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+            <h3 class="card-title">Invoices created directly in Xero</h3>
+            <span style="font-size:.85rem;color:var(--color-muted);">
+                <?= count($xeroOnlyInvoices) ?> invoice<?= count($xeroOnlyInvoices) !== 1 ? 's' : '' ?>
+                &mdash; Total: <strong>R <?= number_format($xeroOnlyTotal, 2) ?></strong>
+            </span>
+        </div>
+        <div class="card-body" style="padding:.5rem 1rem 0;">
+            <p style="font-size:.82rem;color:var(--color-muted);margin:.25rem 0 .75rem;">
+                These invoices were captured in Xero (not through the portal). They're shown here and in each
+                customer's CRM history so your totals cover both systems. Manage them in Xero.
+            </p>
+        </div>
+        <div class="card-body" style="padding:0;overflow-x:auto;">
+            <table class="table" style="margin:0;width:100%;">
+                <thead>
+                    <tr>
+                        <th>Invoice / Ref</th>
+                        <th>Date</th>
+                        <th>Customer</th>
+                        <th>Status</th>
+                        <th class="text-right">Total</th>
+                        <th class="text-right">Balance</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($xeroOnlyInvoices as $xo):
+                        $xoBal  = (float)$xo['amount_due'];
+                        $xoPaid = $xoBal <= 0.001;
+                    ?>
+                    <tr>
+                        <td style="font-family:monospace;font-size:.85rem;white-space:nowrap;">
+                            <?= htmlspecialchars($xo['invoice_no'] ?: ($xo['reference'] ?: '—')) ?>
+                            <span style="background:#E0F2FE;color:#0369A1;padding:.1rem .4rem;border-radius:4px;font-size:.7rem;font-weight:600;font-family:sans-serif;margin-left:.25rem;">Xero</span>
+                        </td>
+                        <td style="white-space:nowrap;font-size:.85rem;"><?= $xo['doc_date'] ? date('d M Y', strtotime($xo['doc_date'])) : '—' ?></td>
+                        <td><?= htmlspecialchars($xo['customer_name'] ?? '—') ?></td>
+                        <td style="font-size:.82rem;color:var(--color-muted);"><?= htmlspecialchars(ucfirst(strtolower($xo['status'] ?? ''))) ?></td>
+                        <td class="text-right"><strong>R <?= number_format((float)$xo['total'], 2) ?></strong></td>
+                        <td class="text-right" style="white-space:nowrap;">
+                            <?php if ($xoPaid): ?>
+                                <span style="color:#16A34A;font-weight:600;font-size:.82rem;">✓ Paid</span>
+                            <?php else: ?>
+                                <span style="color:#D97706;font-weight:600;">R <?= number_format($xoBal, 2) ?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+                <tfoot>
+                    <tr style="background:#F8FAFC;font-weight:700;">
+                        <td colspan="4">Total — <?= count($xeroOnlyInvoices) ?> Xero-only invoice<?= count($xeroOnlyInvoices) !== 1 ? 's' : '' ?></td>
+                        <td class="text-right">R <?= number_format($xeroOnlyTotal, 2) ?></td>
+                        <td></td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    </div>
+</div><!-- /#panel-xero -->
+<?php endif; ?>
 
 <style>
 .tab-btn { transition: color .15s, border-bottom-color .15s; }
