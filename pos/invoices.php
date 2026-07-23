@@ -401,6 +401,16 @@ require_once __DIR__ . '/../includes/header.php';
                                     <span title="Void failed in Xero — has payments there; void it manually in Xero" style="background:#FEF2F2;color:#DC2626;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">Void failed</span>
                                 <?php else: ?>
                                     <span title="Synced to Xero<?= $xStatus ? ' — ' . htmlspecialchars($xStatus) : '' ?>" style="background:#DCFCE7;color:#16A34A;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">✓ Synced</span>
+                                    <?php if (isAdmin()): ?>
+                                    <form method="POST" action="<?= BASE_URL ?>/admin/xero.php" style="display:inline;margin-left:.25rem;"
+                                          onsubmit="return confirm('Re-push this invoice to Xero? It will delete any payment on the Xero copy, rewrite the lines with current settings (tax rate, item codes), and re-apply the payment. Use this after fixing tax/account settings.');">
+                                        <input type="hidden" name="action" value="repush_invoice">
+                                        <input type="hidden" name="invoice_id" value="<?= (int)$inv['id'] ?>">
+                                        <input type="hidden" name="return" value="<?= htmlspecialchars(BASE_URL . '/pos/invoices.php?' . $_SERVER['QUERY_STRING']) ?>">
+                                        <button type="submit" title="Re-push (update) this invoice on Xero with current settings"
+                                                style="background:none;border:none;color:#2563EB;cursor:pointer;font-size:.72rem;padding:0;text-decoration:underline;">↻</button>
+                                    </form>
+                                    <?php endif; ?>
                                 <?php endif;
                             elseif (($inv['status'] ?? 'active') === 'active'): ?>
                                 <?php if (isAdmin()): ?>

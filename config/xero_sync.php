@@ -284,7 +284,7 @@ class XeroSync
      * per-invoice "Push" button. Ignores the enabled/from-date gates because
      * it's always an explicit action. Returns ['ok'=>bool, 'message'=>string, ...].
      */
-    public static function pushSingleInvoice(int $invoiceId): array {
+    public static function pushSingleInvoice(int $invoiceId, bool $force = false): array {
         $pdo = getDB();
         $r = self::fetchOne(
             "SELECT i.*, c.xero_id AS cust_xero_id, c.name AS cust_name, c.id AS cust_id
@@ -294,7 +294,7 @@ class XeroSync
         if (!$r)                            return ['ok' => false, 'message' => 'Invoice not found.'];
         if (($r['status'] ?? '') !== 'active')
             return ['ok' => false, 'skip' => true, 'message' => 'Only finalised invoices can be pushed (not drafts or voided).'];
-        if (!empty($r['xero_id']))
+        if (!empty($r['xero_id']) && !$force)
             return ['ok' => true, 'already' => true, 'xero_id' => $r['xero_id'], 'message' => 'Already on Xero.'];
 
         try {
@@ -362,6 +362,21 @@ class XeroSync
                 'LineItems'       => $lineItems,
             ];
 
+            // Re-push mode: update the existing Xero invoice in place. Any payments on it
+            // must be deleted first, otherwise Xero blocks editing the line items.
+            if (!empty($r['xero_id'])) {
+                $payload['InvoiceID'] = $r['xero_id'];
+                try {
+                    $existing = XeroClient::get('Invoices/' . $r['xero_id'])['Invoices'][0] ?? null;
+                    foreach (($existing['Payments'] ?? []) as $pmt) {
+                        if (!empty($pmt['PaymentID'])) {
+                            try { XeroClient::post('Payments/' . $pmt['PaymentID'], ['Status' => 'DELETED']); }
+                            catch (Throwable $pe) { /* continue — may already be gone */ }
+                        }
+                    }
+                } catch (Throwable $ge) { /* couldn't fetch existing — proceed anyway */ }
+            }
+
             $saved = XeroClient::post('Invoices', ['Invoices' => [$payload]]);
             $doc = $saved['Invoices'][0] ?? null;
             if (!$doc) throw new RuntimeException('Xero did not return the saved invoice');
@@ -395,8 +410,10 @@ class XeroSync
                 ':due' => max(0, (float)($doc['AmountDue'] ?? $r['total']) - $localPaid),
                 ':id'  => $r['id'],
             ]);
-            self::log('push', 'invoice', $r['id'], $xid, 'create', 'ok', $r['invoice_no'] . ' → ' . $r['cust_name']);
-            return ['ok' => true, 'xero_id' => $xid, 'message' => $r['invoice_no'] . ' pushed to Xero.'];
+            $verb = !empty($r['xero_id']) ? 'update' : 'create';
+            self::log('push', 'invoice', $r['id'], $xid, $verb, 'ok', $r['invoice_no'] . ' → ' . $r['cust_name']);
+            return ['ok' => true, 'xero_id' => $xid,
+                    'message' => $r['invoice_no'] . ($verb === 'update' ? ' re-pushed (updated) on Xero.' : ' pushed to Xero.')];
         } catch (Throwable $e) {
             self::log('push', 'invoice', $r['id'], null, 'error', 'error', $e->getMessage());
             return ['ok' => false, 'message' => $e->getMessage()];

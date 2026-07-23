@@ -93,10 +93,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    if ($action === 'push_invoice' && !empty($_POST['invoice_id'])) {
+    if (($action === 'push_invoice' || $action === 'repush_invoice') && !empty($_POST['invoice_id'])) {
         require_once __DIR__ . '/../config/xero_sync.php';
-        $res = XeroSync::pushSingleInvoice((int)$_POST['invoice_id']);
-        logAudit($pdo, 'xero_push_invoice', 'invoices', (int)$_POST['invoice_id'], $res['message'] ?? '');
+        $force = ($action === 'repush_invoice');
+        $res = XeroSync::pushSingleInvoice((int)$_POST['invoice_id'], $force);
+        logAudit($pdo, $force ? 'xero_repush_invoice' : 'xero_push_invoice', 'invoices', (int)$_POST['invoice_id'], $res['message'] ?? '');
         setFlash($res['ok'] ? 'success' : 'error', 'Xero: ' . ($res['message'] ?? ''));
         $back = $_POST['return'] ?? (BASE_URL . '/admin/xero.php');
         header('Location: ' . $back);
