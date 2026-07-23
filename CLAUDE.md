@@ -219,6 +219,12 @@ built on the portal's own tables (no staging copies), ported from the SageSync p
 - **Inventory:** invoice lines send `ItemCode` = product SKU; `ensureXeroItem()` upserts each SKU as a Xero Item first
   (Name max 50 chars) so the Item column populates and tracked items deduct stock. Non-fatal — invoice still pushes if the
   item upsert fails.
+- **Payment-method mapping:** `xero_payment_map` (JSON, payment_methods.code → Xero account code) maps each POS payment
+  method to its own Xero bank/cash account; the payment push uses the invoice's method's mapped account, falling back to
+  `xero_payment_account_code`. Edited on the Admin → Xero Sync "Payment Methods → Xero Accounts" card.
+- **Re-push:** `pushSingleInvoice($id, force:true)` updates an already-linked Xero invoice in place — deletes its Xero
+  payments first (so lines are editable), rewrites lines with current settings, re-applies payment. UI: ↻ next to the
+  ✓ Synced badge on `pos/invoices.php` (admin), and `repush_invoice` action.
 
 ## Navigation
 

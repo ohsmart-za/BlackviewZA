@@ -104,6 +104,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'save_payment_map') {
+        $map = [];
+        foreach (($_POST['pm'] ?? []) as $code => $acct) {
+            $acct = trim($acct);
+            if ($acct !== '') $map[$code] = $acct;
+        }
+        saveSettings($pdo, ['xero_payment_map' => json_encode($map)]);
+        logAudit($pdo, 'xero_payment_map', 'settings', null, 'Payment→Xero account map: ' . json_encode($map));
+        setFlash('success', 'Payment method mapping saved.');
+        header('Location: ' . BASE_URL . '/admin/xero.php');
+        exit;
+    }
+
     if ($action === 'refresh_meta') {
         try {
             $accts = XeroClient::get('Accounts')['Accounts'] ?? [];
@@ -174,6 +187,13 @@ foreach ($xeroAccounts as $a) {
 $curAccount    = xeroSetting('xero_account_code', '200');
 $curTaxType    = xeroSetting('xero_tax_type', 'OUTPUT2');
 $curPayAccount = xeroSetting('xero_payment_account_code', '');
+
+// Payment methods + their current Xero-account mapping
+$paymentMethods = [];
+try {
+    $paymentMethods = $pdo->query("SELECT code, name, icon FROM payment_methods WHERE is_active = 1 ORDER BY sort_order ASC, name ASC")->fetchAll();
+} catch (Throwable $e) { /* table may not exist */ }
+$paymentMap = json_decode(xeroSetting('xero_payment_map', '{}'), true) ?: [];
 
 // Quick counts
 $counts = ['cust_linked' => 0, 'cust_total' => 0, 'inv_pending' => 0, 'inv_linked' => 0, 'mirror' => 0];
@@ -437,6 +457,66 @@ require_once __DIR__ . '/../includes/header.php';
             <?php endif; ?>
         </div>
     </div>
+
+    <!-- Payment Method → Xero Account mapping -->
+    <?php if (!empty($paymentMethods)): ?>
+    <div class="card" style="margin-top:1rem;">
+        <div class="card-header"><h3 class="card-title">Payment Methods → Xero Accounts</h3></div>
+        <div class="card-body">
+            <p style="font-size:.82rem;color:#6B7280;margin:0 0 1rem;">
+                Map each payment method to the Xero bank/cash account its money lands in.
+                When a paid invoice pushes, its payment goes to the matched account.
+                Unmapped methods fall back to the default Payment Account above.
+            </p>
+            <?php if (empty($paymentAccounts)): ?>
+            <div class="alert alert-warning" style="font-size:.85rem;">
+                Click <strong>Load accounts &amp; tax rates from Xero</strong> above first to choose accounts here.
+            </div>
+            <?php endif; ?>
+            <form method="POST" action="">
+                <input type="hidden" name="action" value="save_payment_map">
+                <table style="width:100%;border-collapse:collapse;font-size:.88rem;">
+                    <thead>
+                        <tr>
+                            <th style="text-align:left;padding:.4rem .5rem;color:#6B7280;font-size:.75rem;text-transform:uppercase;border-bottom:1px solid #E5E7EB;">Payment Method</th>
+                            <th style="text-align:left;padding:.4rem .5rem;color:#6B7280;font-size:.75rem;text-transform:uppercase;border-bottom:1px solid #E5E7EB;">Xero Account</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($paymentMethods as $pm):
+                            $cur = $paymentMap[$pm['code']] ?? '';
+                        ?>
+                        <tr>
+                            <td style="padding:.45rem .5rem;border-bottom:1px solid #F3F4F6;">
+                                <?= htmlspecialchars($pm['icon'] ?? '') ?> <strong><?= htmlspecialchars($pm['name']) ?></strong>
+                                <span style="color:#9CA3AF;font-family:monospace;font-size:.78rem;">(<?= htmlspecialchars($pm['code']) ?>)</span>
+                            </td>
+                            <td style="padding:.45rem .5rem;border-bottom:1px solid #F3F4F6;">
+                                <?php if (!empty($paymentAccounts)): ?>
+                                <select name="pm[<?= htmlspecialchars($pm['code']) ?>]" class="form-control" style="min-width:200px;">
+                                    <option value="">— Use default / don't push —</option>
+                                    <?php foreach ($paymentAccounts as $a): ?>
+                                    <option value="<?= htmlspecialchars($a['Code']) ?>" <?= $cur === ($a['Code'] ?? '') ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($a['Code'] . ' — ' . ($a['Name'] ?? '')) ?>
+                                    </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <?php else: ?>
+                                <input type="text" name="pm[<?= htmlspecialchars($pm['code']) ?>]" class="form-control"
+                                       style="max-width:120px;" value="<?= htmlspecialchars($cur) ?>" placeholder="Account code">
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <div class="form-actions" style="margin-top:1rem;">
+                    <button type="submit" class="btn btn-primary">Save Mapping</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <?php endif; ?>
 </div>
 
 <!-- RIGHT: Controls + How it works + Log -->

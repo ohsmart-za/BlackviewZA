@@ -310,7 +310,12 @@ class XeroSync
 
             $accountCode = xeroSetting('xero_account_code', '200');
             $taxType     = xeroSetting('xero_tax_type', 'OUTPUT2');
-            $payAccount  = xeroSetting('xero_payment_account_code');
+            // Payment account: prefer the per-payment-method mapping, else the global default
+            $payMap      = json_decode(xeroSetting('xero_payment_map', '{}'), true) ?: [];
+            $invPayCode  = $r['payment_method'] ?? '';
+            $payAccount  = ($invPayCode !== '' && !empty($payMap[$invPayCode]))
+                           ? $payMap[$invPayCode]
+                           : xeroSetting('xero_payment_account_code', '');
 
             $lineStmt = $pdo->prepare(
                 "SELECT ii.*, p.name AS product_name, p.sku
