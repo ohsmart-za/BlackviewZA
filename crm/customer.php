@@ -92,12 +92,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
 $invoices = [];
 try {
     $invStmt = $pdo->prepare(
-        "SELECT id, invoice_no, total, payment_method, channel, created_at, notes
+        "SELECT id, invoice_no, total, payment_method, channel, created_at, notes,
+                xero_id, xero_status, xero_amount_due
          FROM invoices WHERE customer_id = :cid ORDER BY created_at DESC LIMIT 100"
     );
     $invStmt->execute([':cid' => $customerId]);
     $invoices = $invStmt->fetchAll();
-} catch (Throwable $e) { /* ignore */ }
+} catch (Throwable $e) {
+    // Fallback if Xero columns not migrated yet
+    try {
+        $invStmt = $pdo->prepare(
+            "SELECT id, invoice_no, total, payment_method, channel, created_at, notes
+             FROM invoices WHERE customer_id = :cid ORDER BY created_at DESC LIMIT 100"
+        );
+        $invStmt->execute([':cid' => $customerId]);
+        $invoices = $invStmt->fetchAll();
+    } catch (Throwable $e2) { /* ignore */ }
+}
+
+// Invoices that exist only in Xero (created there directly) — synced mirror
+$xeroInvoices = [];
+try {
+    $xiStmt = $pdo->prepare(
+        "SELECT invoice_no, reference, status, doc_date, due_date, total, amount_due
+         FROM xero_invoices_mirror
+         WHERE customer_id = :cid AND status NOT IN ('DELETED','VOIDED')
+         ORDER BY doc_date DESC LIMIT 100"
+    );
+    $xiStmt->execute([':cid' => $customerId]);
+    $xeroInvoices = $xiStmt->fetchAll();
+} catch (Throwable $e) { /* migration_023 not run yet */ }
 
 // Load payments for balance calculation
 $invoiceIds = array_column($invoices, 'id');
@@ -139,12 +163,18 @@ try {
     $quotes = $qStmt->fetchAll();
 } catch (Throwable $e) { /* ignore */ }
 
-// Summary stats
-$totalInvoices  = count($invoices);
-$totalSpend     = array_sum(array_column($invoices, 'total'));
+// Summary stats — portal invoices + Xero-only invoices combined
+$totalInvoices  = count($invoices) + count($xeroInvoices);
+$totalSpend     = array_sum(array_column($invoices, 'total'))
+                + array_sum(array_column($xeroInvoices, 'total'));
 $totalQuotes    = count($quotes);
-$firstActivity  = !empty($invoices) ? min(array_column($invoices, 'created_at')) : ($customer['created_at'] ?? null);
-$lastActivity   = !empty($invoices) ? max(array_column($invoices, 'created_at')) : null;
+$activityDates  = array_merge(
+    array_column($invoices, 'created_at'),
+    array_filter(array_column($xeroInvoices, 'doc_date'))
+);
+$firstActivity  = !empty($activityDates) ? min($activityDates) : ($customer['created_at'] ?? null);
+$lastActivity   = !empty($activityDates) ? max($activityDates) : null;
+$isXeroLinked   = !empty($customer['xero_id']);
 
 $pageTitle = 'CRM — ' . htmlspecialchars($customer['name']);
 $activeTab = $_GET['tab'] ?? 'invoices';
@@ -161,6 +191,9 @@ require_once __DIR__ . '/../includes/header.php';
                 <?= htmlspecialchars($customer['company_name']) ?> &nbsp;·&nbsp;
             <?php endif; ?>
             <?= ($customer['contact_type'] ?? 'individual') === 'business' ? 'Business' : 'Individual' ?>
+            <?php if ($isXeroLinked): ?>
+                &nbsp;<span style="background:#E0F2FE;color:#0369A1;padding:.15rem .55rem;border-radius:5px;font-size:.78rem;font-weight:600;vertical-align:middle;">✓ Xero linked</span>
+            <?php endif; ?>
         </p>
     </div>
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
@@ -312,15 +345,33 @@ require_once __DIR__ . '/../includes/header.php';
                     </tr>
                 </thead>
                 <tbody>
-                    <?php if (empty($invoices)): ?>
+                    <?php if (empty($invoices) && empty($xeroInvoices)): ?>
                     <tr><td colspan="7" style="text-align:center;color:#9CA3AF;padding:1.5rem;">No invoices yet.</td></tr>
-                    <?php else: foreach ($invoices as $inv):
-                        $paid    = $paidMap[$inv['id']] ?? 0;
-                        $balance = round((float)$inv['total'] - $paid, 2);
-                        $isPaid  = $balance <= 0.001;
+                    <?php else:
+                        // Merge portal + Xero-only invoices into one date-sorted list
+                        $allInvoices = [];
+                        foreach ($invoices as $inv) { $inv['_source'] = 'portal'; $inv['_date'] = $inv['created_at']; $allInvoices[] = $inv; }
+                        foreach ($xeroInvoices as $xi) { $xi['_source'] = 'xero'; $xi['_date'] = $xi['doc_date'] ?: '1970-01-01'; $allInvoices[] = $xi; }
+                        usort($allInvoices, fn($a, $b) => strcmp($b['_date'], $a['_date']));
+                        foreach ($allInvoices as $inv):
+                            if ($inv['_source'] === 'portal'):
+                                // If pushed to Xero, the live Xero balance wins (payments recorded in Xero flow back)
+                                if (!empty($inv['xero_id']) && $inv['xero_amount_due'] !== null) {
+                                    $balance = (float)$inv['xero_amount_due'];
+                                    $paid    = round((float)$inv['total'] - $balance, 2);
+                                } else {
+                                    $paid    = $paidMap[$inv['id']] ?? 0;
+                                    $balance = round((float)$inv['total'] - $paid, 2);
+                                }
+                                $isPaid = $balance <= 0.001;
                     ?>
                     <tr>
-                        <td style="font-weight:600;"><?= htmlspecialchars($inv['invoice_no']) ?></td>
+                        <td style="font-weight:600;">
+                            <?= htmlspecialchars($inv['invoice_no']) ?>
+                            <?php if (!empty($inv['xero_id'])): ?>
+                                <span title="Synced to Xero" style="color:#0369A1;font-size:.72rem;font-weight:600;">✓X</span>
+                            <?php endif; ?>
+                        </td>
                         <td style="color:#6B7280;font-size:.9rem;"><?= date('d M Y', strtotime($inv['created_at'])) ?></td>
                         <td style="text-align:right;">R <?= number_format((float)$inv['total'], 2) ?></td>
                         <td style="text-align:right;color:<?= $isPaid ? '#16A34A' : '#DC2626' ?>;">R <?= number_format($paid, 2) ?></td>
@@ -334,7 +385,31 @@ require_once __DIR__ . '/../includes/header.php';
                         <td style="font-size:.85rem;color:#6B7280;"><?= ucfirst($inv['channel'] ?? '—') ?></td>
                         <td><a href="<?= BASE_URL ?>/pos/invoice.php?id=<?= $inv['id'] ?>" class="btn btn-sm btn-outline">View</a></td>
                     </tr>
-                    <?php endforeach; endif; ?>
+                    <?php else:
+                            // Xero-only invoice (created directly in Xero)
+                            $balance = (float)$inv['amount_due'];
+                            $paid    = round((float)$inv['total'] - $balance, 2);
+                            $isPaid  = $balance <= 0.001;
+                    ?>
+                    <tr style="background:#F8FAFC;">
+                        <td style="font-weight:600;">
+                            <?= htmlspecialchars($inv['invoice_no'] ?: ($inv['reference'] ?: 'Xero invoice')) ?>
+                            <span style="background:#E0F2FE;color:#0369A1;padding:.1rem .4rem;border-radius:4px;font-size:.72rem;font-weight:600;margin-left:.25rem;">Xero</span>
+                        </td>
+                        <td style="color:#6B7280;font-size:.9rem;"><?= $inv['doc_date'] ? date('d M Y', strtotime($inv['doc_date'])) : '—' ?></td>
+                        <td style="text-align:right;">R <?= number_format((float)$inv['total'], 2) ?></td>
+                        <td style="text-align:right;color:<?= $isPaid ? '#16A34A' : '#DC2626' ?>;">R <?= number_format($paid, 2) ?></td>
+                        <td>
+                            <?php if ($isPaid): ?>
+                            <span style="background:#DCFCE7;color:#16A34A;padding:.15rem .5rem;border-radius:4px;font-size:.8rem;">Paid</span>
+                            <?php else: ?>
+                            <span style="background:#FEF2F2;color:#DC2626;padding:.15rem .5rem;border-radius:4px;font-size:.8rem;">R <?= number_format($balance,2) ?> owed</span>
+                            <?php endif; ?>
+                        </td>
+                        <td style="font-size:.85rem;color:#6B7280;">Xero</td>
+                        <td style="color:#9CA3AF;font-size:.8rem;">in Xero</td>
+                    </tr>
+                    <?php endif; endforeach; endif; ?>
                 </tbody>
             </table>
         </div>

@@ -184,6 +184,27 @@ Products have `product_type ENUM('physical','service')`.
 | `can_edit_invoices` | `users` | `0` | Can edit posted invoices (audit-logged) |
 | `can_use_pos` | `users` | `1` | Access to POS (`pos/index.php`); when 0, redirected to `/invoices/create.php` |
 
+## Xero Integration
+
+Xero is the **main accounting system**; the portal is the processing front-end. Two-way sync
+built on the portal's own tables (no staging copies), ported from the SageSync project's client.
+
+- **Files:** `config/xero_client.php` (OAuth2 client), `config/xero_sync.php` (`XeroSync::run()`),
+  `auth/xero_callback.php` (OAuth redirect), `admin/xero.php` (connect/settings/sync/log).
+- **Link columns:** `customers.xero_id` (ContactID), `invoices.xero_id/xero_status/xero_amount_due`,
+  `quotes.xero_id`; each with `xero_synced_at`. `xero_invoices_mirror` holds invoices that exist
+  only in Xero (shown in CRM history + totals). Tokens in `xero_oauth_tokens`; log in `xero_sync_log`.
+- **Dirty rule:** a row needs pushing when `updated_at > xero_synced_at` (MySQL auto-maintains
+  `updated_at`). Sync-side writes always set `xero_synced_at = NOW()` in the same statement so
+  they never re-flag themselves. Local edits win pull conflicts.
+- **Flow:** customers push+pull (merge by xero_id → email → name); `active` invoices push as
+  ACCREC AUTHORISED (discount as negative line, `LineAmountTypes: Exclusive`); voided → VOIDED
+  (fails if paid in Xero → status `VOID_FAILED`, no retry); status/AmountDue pulled back;
+  sent/accepted quotes push. Optional `xero_payment_account_code` setting pushes POS payments.
+- **Settings keys:** `xero_client_id/secret/redirect_uri/scopes/tenant_id/account_code/tax_type/payment_account_code`.
+  SA tax type = `OUTPUT2` (15%); Demo Company (Global) uses `OUTPUT`.
+- Sync is manual via Admin → Xero Sync → "Sync Now". CRM shows live Xero balance for pushed invoices.
+
 ## Navigation
 
 Nav items stored in `nav_links` table (`label, url, icon_class, role_required, display_order, is_active`).
