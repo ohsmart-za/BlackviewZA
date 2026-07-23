@@ -126,6 +126,7 @@ foreach ($navLinks as $link) {
             ['label' => 'Payment Methods',  'url' => BASE_URL . '/admin/payment_methods.php',  'match' => '/admin/payment_methods.php'],
             ['label' => 'Customer Statement','url' => BASE_URL . '/admin/customer_statement.php','match' => '/admin/customer_statement.php'],
             ['label' => 'Xero Sync',        'url' => BASE_URL . '/admin/xero.php',             'match' => '/admin/xero.php'],
+            ['label' => 'Xero Log',         'url' => BASE_URL . '/admin/xero_log.php',         'match' => '/admin/xero_log.php'],
             ['label' => 'Nav Links',        'url' => BASE_URL . '/admin/nav_links.php',        'match' => '/admin/nav_links.php'],
             ['label' => 'Company Docs',     'url' => BASE_URL . '/admin/company_docs.php',    'match' => '/admin/company_docs.php'],
             ['label' => 'Audit Log',        'url' => BASE_URL . '/admin/audit_log.php',        'match' => '/admin/audit_log.php'],

@@ -670,34 +670,24 @@ require_once __DIR__ . '/../includes/header.php';
     </div>
 
     <div class="card">
-        <div class="card-header"><h3 class="card-title">Sync Log</h3></div>
-        <div class="table-responsive">
-            <table class="table table-striped" style="font-size:.82rem;">
-                <thead>
-                    <tr>
-                        <th>Time</th><th>Dir</th><th>Entity</th><th>Action</th><th>Message</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($logRows)): ?>
-                    <tr><td colspan="5" style="text-align:center;color:#9CA3AF;padding:1.5rem;">No sync activity yet.</td></tr>
-                    <?php else: foreach ($logRows as $lg): ?>
-                    <tr>
-                        <td style="white-space:nowrap;color:#6B7280;"><?= date('d M H:i', strtotime($lg['ts'])) ?></td>
-                        <td><?= $lg['direction'] === 'push' ? '⬆' : '⬇' ?> <?= htmlspecialchars($lg['direction']) ?></td>
-                        <td><?= htmlspecialchars($lg['entity']) ?><?= $lg['entity_id'] ? ' #' . (int)$lg['entity_id'] : '' ?></td>
-                        <td>
-                            <?php if ($lg['status'] === 'error'): ?>
-                                <span style="background:#FEF2F2;color:#DC2626;padding:.1rem .4rem;border-radius:4px;font-weight:600;">error</span>
-                            <?php else: ?>
-                                <span style="color:#16A34A;"><?= htmlspecialchars($lg['action']) ?></span>
-                            <?php endif; ?>
-                        </td>
-                        <td style="color:#374151;word-break:break-word;"><?= htmlspecialchars($lg['message']) ?></td>
-                    </tr>
-                    <?php endforeach; endif; ?>
-                </tbody>
-            </table>
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+            <h3 class="card-title">Recent Sync Activity</h3>
+            <a href="<?= BASE_URL ?>/admin/xero_log.php" class="btn btn-outline btn-sm">Full log &amp; clear →</a>
+        </div>
+        <div class="card-body" style="padding:.5rem 0;">
+            <?php if (empty($logRows)): ?>
+            <p style="text-align:center;color:#9CA3AF;padding:1.5rem;margin:0;">No sync activity yet.</p>
+            <?php else: foreach (array_slice($logRows, 0, 12) as $lg): ?>
+            <div style="display:flex;gap:.6rem;align-items:flex-start;padding:.5rem 1rem;border-bottom:1px solid #F3F4F6;<?= $lg['status']==='error'?'background:#FEF2F2;':'' ?>">
+                <span style="white-space:nowrap;color:#9CA3AF;font-size:.75rem;min-width:70px;"><?= date('d M H:i', strtotime($lg['ts'])) ?></span>
+                <span style="white-space:nowrap;font-size:.78rem;min-width:70px;color:#6B7280;">
+                    <?= $lg['direction']==='push'?'⬆':'⬇' ?> <?= htmlspecialchars($lg['entity']) ?><?= $lg['entity_id'] ? ' #'.(int)$lg['entity_id'] : '' ?>
+                </span>
+                <span style="flex:1;font-size:.8rem;line-height:1.4;<?= $lg['status']==='error'?'color:#DC2626;':'color:#374151;' ?>word-break:break-word;">
+                    <?php if ($lg['status']==='error'): ?><strong>error:</strong> <?php endif; ?><?= htmlspecialchars(mb_substr($lg['message'], 0, 160)) ?><?= mb_strlen($lg['message'])>160?'…':'' ?>
+                </span>
+            </div>
+            <?php endforeach; endif; ?>
         </div>
     </div>
 </div>

@@ -444,11 +444,14 @@ class XeroSync
 
         $payload = ['Name' => mb_substr($xeroName, 0, 255)];
         $email = trim($r['email'] ?? '');
-        if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) $payload['EmailAddress'] = $email;
+        $hasEmail = ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL));
+        if ($hasEmail) $payload['EmailAddress'] = $email;
         if (($r['vat_no'] ?? '') !== '') $payload['TaxNumber'] = mb_substr($r['vat_no'], 0, 50);
         if (($r['phone'] ?? '') !== '')  $payload['Phones'] = [['PhoneType' => 'DEFAULT', 'PhoneNumber' => mb_substr($r['phone'], 0, 50)]];
         if (($r['address'] ?? '') !== '') $payload['Addresses'] = [['AddressType' => 'STREET', 'AddressLine1' => mb_substr($r['address'], 0, 500)]];
-        if (($r['company_name'] ?? '') !== '' && ($r['name'] ?? '') !== $r['company_name'] && trim($r['name'] ?? '') !== '') {
+        // ContactPersons: only when the main contact has an email — Xero rejects
+        // "Additional people cannot be added when primary person has no email address set."
+        if ($hasEmail && ($r['company_name'] ?? '') !== '' && ($r['name'] ?? '') !== $r['company_name'] && trim($r['name'] ?? '') !== '') {
             $parts = explode(' ', trim($r['name']), 2);
             $payload['ContactPersons'] = [[
                 'FirstName'       => mb_substr($parts[0], 0, 50),
