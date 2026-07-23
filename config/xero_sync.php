@@ -44,14 +44,25 @@ class XeroSync
         $push = ($dir === 'both' || $dir === 'push');
         $pull = ($dir === 'both' || $dir === 'pull');
 
-        if ($push) self::pushCustomers($s);
-        if ($pull) self::pullContacts($s);
-        if ($push) self::pushInvoices($s);
-        if ($pull) self::pullInvoices($s);
-        if ($push) self::pushQuotes($s);
+        // Per-entity switches (independent — contacts, invoices, quotes)
+        $doCustomers = xeroSetting('xero_sync_customers', '1') === '1';
+        $doInvoices  = xeroSetting('xero_sync_invoices',  '0') === '1'; // default OFF — invoices pushed manually
+        $doQuotes    = xeroSetting('xero_sync_quotes',    '0') === '1';
+
+        if ($doCustomers && $push) self::pushCustomers($s);
+        if ($doCustomers && $pull) self::pullContacts($s);
+        if ($doInvoices  && $push) self::pushInvoices($s);
+        if ($doInvoices  && $pull) self::pullInvoices($s);
+        if ($doQuotes    && $push) self::pushQuotes($s);
 
         xeroSaveSetting('xero_last_sync_at', date('Y-m-d H:i:s'));
         return $s;
+    }
+
+    /** Sync start date (YYYY-MM-DD). Invoices dated before this are never pushed/pulled. '' = no limit. */
+    private static function syncFromDate(): string {
+        $d = xeroSetting('xero_sync_from_date', '');
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) ? $d : '';
     }
 
     // ============================================================
@@ -221,111 +232,26 @@ class XeroSync
     private static function pushInvoices(array &$s): void {
         $pdo = getDB();
 
-        // 1. New finalised invoices not yet on Xero
-        $rows = $pdo->query(
-            "SELECT i.*, c.xero_id AS cust_xero_id, c.name AS cust_name
-             FROM invoices i
-             JOIN customers c ON c.id = i.customer_id
-             WHERE i.status = 'active' AND i.xero_id IS NULL
-             ORDER BY i.id ASC LIMIT 100"
-        )->fetchAll();
+        // 1. New finalised invoices not yet on Xero, on/after the sync-from date
+        $fromDate = self::syncFromDate();
+        $sql = "SELECT i.id
+                FROM invoices i
+                JOIN customers c ON c.id = i.customer_id
+                WHERE i.status = 'active' AND i.xero_id IS NULL";
+        $params = [];
+        if ($fromDate !== '') {
+            $sql .= " AND DATE(COALESCE(i.invoice_date, i.created_at)) >= :fromdate";
+            $params[':fromdate'] = $fromDate;
+        }
+        $sql .= " ORDER BY i.id ASC LIMIT 100";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-        $accountCode = xeroSetting('xero_account_code', '200');
-        $taxType     = xeroSetting('xero_tax_type', 'OUTPUT2');
-        $payAccount  = xeroSetting('xero_payment_account_code'); // optional
-
-        foreach ($rows as $r) {
-            try {
-                if (!$r['cust_xero_id']) {
-                    self::log('push', 'invoice', $r['id'], null, 'skip', 'ok',
-                        "Customer '{$r['cust_name']}' not on Xero yet — will retry next sync");
-                    continue;
-                }
-
-                $lineStmt = $pdo->prepare(
-                    "SELECT ii.*, p.name AS product_name, p.sku
-                     FROM invoice_items ii
-                     LEFT JOIN products p ON p.id = ii.product_id
-                     WHERE ii.invoice_id = :id"
-                );
-                $lineStmt->execute([':id' => $r['id']]);
-                $lineItems = [];
-                foreach ($lineStmt->fetchAll() as $ln) {
-                    $desc = $ln['product_name'] ?: 'Item';
-                    if (!empty($ln['sku']))       $desc .= ' (' . $ln['sku'] . ')';
-                    if (!empty($ln['serial_no'])) $desc .= ' — SN: ' . $ln['serial_no'];
-                    $lineItems[] = [
-                        'Description' => $desc,
-                        'Quantity'    => (float)($ln['qty'] ?? 1),
-                        'UnitAmount'  => (float)$ln['unit_price'],   // excl. VAT
-                        'AccountCode' => $accountCode,
-                        'TaxType'     => $taxType,
-                    ];
-                }
-                // Portal discount → its own negative line so Xero's total matches ours
-                if ((float)($r['discount_amount'] ?? 0) > 0) {
-                    $lineItems[] = [
-                        'Description' => 'Discount (' . rtrim(rtrim(number_format((float)$r['discount_pct'], 1), '0'), '.') . '%)',
-                        'Quantity'    => 1,
-                        'UnitAmount'  => -(float)$r['discount_amount'],
-                        'AccountCode' => $accountCode,
-                        'TaxType'     => $taxType,
-                    ];
-                }
-                if (empty($lineItems)) { self::log('push', 'invoice', $r['id'], null, 'skip', 'ok', 'No line items'); continue; }
-
-                $docDate = substr($r['invoice_date'] ?? $r['created_at'], 0, 10);
-                $payload = [
-                    'Type'            => 'ACCREC',
-                    'Contact'         => ['ContactID' => $r['cust_xero_id']],
-                    'InvoiceNumber'   => $r['invoice_no'],
-                    'Date'            => $docDate,
-                    'DueDate'         => $r['due_date'] ?: $docDate,
-                    'Reference'       => 'Blackview Portal — ' . ucfirst($r['channel'] ?? ''),
-                    'Status'          => 'AUTHORISED',
-                    'LineAmountTypes' => 'Exclusive',
-                    'LineItems'       => $lineItems,
-                ];
-
-                $saved = XeroClient::post('Invoices', ['Invoices' => [$payload]]);
-                $doc = $saved['Invoices'][0] ?? null;
-                if (!$doc) throw new RuntimeException('Xero did not return the saved invoice');
-                $xid = $doc['InvoiceID'];
-
-                // 2. Optional: mirror local POS payments so cash sales don't pile up unpaid in Xero
-                $localPaid = 0.0;
-                if ($payAccount !== '') {
-                    try {
-                        $pStmt = $pdo->prepare("SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE invoice_id = :id");
-                        $pStmt->execute([':id' => $r['id']]);
-                        $localPaid = min((float)$pStmt->fetchColumn(), (float)($doc['AmountDue'] ?? $r['total']));
-                        if ($localPaid > 0.009) {
-                            XeroClient::post('Payments', ['Payments' => [[
-                                'Invoice' => ['InvoiceID' => $xid],
-                                'Account' => ['Code' => $payAccount],
-                                'Date'    => $docDate,
-                                'Amount'  => round($localPaid, 2),
-                            ]]]);
-                        }
-                    } catch (Throwable $pe) {
-                        self::log('push', 'payment', $r['id'], $xid, 'error', 'error', 'Invoice pushed OK but payment failed: ' . $pe->getMessage());
-                    }
-                }
-
-                $pdo->prepare(
-                    "UPDATE invoices SET xero_id = :x, xero_status = :st, xero_amount_due = :due, xero_synced_at = NOW() WHERE id = :id"
-                )->execute([
-                    ':x'   => $xid,
-                    ':st'  => $doc['Status'] ?? 'AUTHORISED',
-                    ':due' => max(0, (float)($doc['AmountDue'] ?? $r['total']) - $localPaid),
-                    ':id'  => $r['id'],
-                ]);
-                self::log('push', 'invoice', $r['id'], $xid, 'create', 'ok', $r['invoice_no'] . ' → ' . $r['cust_name']);
-                $s['pushed_invoices']++;
-            } catch (Throwable $e) {
-                $s['errors']++;
-                self::log('push', 'invoice', $r['id'], null, 'error', 'error', $e->getMessage());
-            }
+        foreach ($ids as $id) {
+            $res = self::pushSingleInvoice((int)$id);
+            if (!empty($res['ok']) && empty($res['already'])) $s['pushed_invoices']++;
+            elseif (empty($res['ok']) && empty($res['skip']))  $s['errors']++;
         }
 
         // 3. Locally-voided invoices that are still live on Xero
@@ -351,6 +277,143 @@ class XeroSync
                     'Void failed (has payments in Xero? void it there manually): ' . $e->getMessage());
             }
         }
+    }
+
+    /**
+     * Push ONE invoice to Xero. Used both by the bulk loop and by the manual
+     * per-invoice "Push" button. Ignores the enabled/from-date gates because
+     * it's always an explicit action. Returns ['ok'=>bool, 'message'=>string, ...].
+     */
+    public static function pushSingleInvoice(int $invoiceId): array {
+        $pdo = getDB();
+        $r = self::fetchOne(
+            "SELECT i.*, c.xero_id AS cust_xero_id, c.name AS cust_name, c.id AS cust_id
+             FROM invoices i JOIN customers c ON c.id = i.customer_id
+             WHERE i.id = :id LIMIT 1", [':id' => $invoiceId]);
+
+        if (!$r)                            return ['ok' => false, 'message' => 'Invoice not found.'];
+        if (($r['status'] ?? '') !== 'active')
+            return ['ok' => false, 'skip' => true, 'message' => 'Only finalised invoices can be pushed (not drafts or voided).'];
+        if (!empty($r['xero_id']))
+            return ['ok' => true, 'already' => true, 'xero_id' => $r['xero_id'], 'message' => 'Already on Xero.'];
+
+        try {
+            // Make sure the customer exists on Xero first
+            $custXeroId = $r['cust_xero_id'];
+            if (!$custXeroId) {
+                $custRow = self::fetchOne("SELECT * FROM customers WHERE id = :id", [':id' => $r['cust_id']]);
+                $custXeroId = $custRow ? self::pushOneCustomer($custRow) : null;
+                if (!$custXeroId) {
+                    return ['ok' => false, 'message' => "Could not sync customer '{$r['cust_name']}' to Xero first."];
+                }
+            }
+
+            $accountCode = xeroSetting('xero_account_code', '200');
+            $taxType     = xeroSetting('xero_tax_type', 'OUTPUT2');
+            $payAccount  = xeroSetting('xero_payment_account_code');
+
+            $lineStmt = $pdo->prepare(
+                "SELECT ii.*, p.name AS product_name, p.sku
+                 FROM invoice_items ii LEFT JOIN products p ON p.id = ii.product_id
+                 WHERE ii.invoice_id = :id"
+            );
+            $lineStmt->execute([':id' => $r['id']]);
+            $lineItems = [];
+            foreach ($lineStmt->fetchAll() as $ln) {
+                $desc = $ln['product_name'] ?: 'Item';
+                if (!empty($ln['sku']))       $desc .= ' (' . $ln['sku'] . ')';
+                if (!empty($ln['serial_no'])) $desc .= ' — SN: ' . $ln['serial_no'];
+                $lineItems[] = [
+                    'Description' => $desc,
+                    'Quantity'    => (float)($ln['qty'] ?? 1),
+                    'UnitAmount'  => (float)$ln['unit_price'],
+                    'AccountCode' => $accountCode,
+                    'TaxType'     => $taxType,
+                ];
+            }
+            if ((float)($r['discount_amount'] ?? 0) > 0) {
+                $lineItems[] = [
+                    'Description' => 'Discount (' . rtrim(rtrim(number_format((float)$r['discount_pct'], 1), '0'), '.') . '%)',
+                    'Quantity'    => 1,
+                    'UnitAmount'  => -(float)$r['discount_amount'],
+                    'AccountCode' => $accountCode,
+                    'TaxType'     => $taxType,
+                ];
+            }
+            if (empty($lineItems)) return ['ok' => false, 'message' => 'Invoice has no line items.'];
+
+            $docDate = substr($r['invoice_date'] ?? $r['created_at'], 0, 10);
+            $payload = [
+                'Type'            => 'ACCREC',
+                'Contact'         => ['ContactID' => $custXeroId],
+                'InvoiceNumber'   => $r['invoice_no'],
+                'Date'            => $docDate,
+                'DueDate'         => $r['due_date'] ?: $docDate,
+                'Reference'       => 'Blackview Portal — ' . ucfirst($r['channel'] ?? ''),
+                'Status'          => 'AUTHORISED',
+                'LineAmountTypes' => 'Exclusive',
+                'LineItems'       => $lineItems,
+            ];
+
+            $saved = XeroClient::post('Invoices', ['Invoices' => [$payload]]);
+            $doc = $saved['Invoices'][0] ?? null;
+            if (!$doc) throw new RuntimeException('Xero did not return the saved invoice');
+            $xid = $doc['InvoiceID'];
+
+            // Optionally push POS payments so cash sales show as paid in Xero
+            $localPaid = 0.0;
+            if ($payAccount !== '') {
+                try {
+                    $pStmt = $pdo->prepare("SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE invoice_id = :id");
+                    $pStmt->execute([':id' => $r['id']]);
+                    $localPaid = min((float)$pStmt->fetchColumn(), (float)($doc['AmountDue'] ?? $r['total']));
+                    if ($localPaid > 0.009) {
+                        XeroClient::post('Payments', ['Payments' => [[
+                            'Invoice' => ['InvoiceID' => $xid],
+                            'Account' => ['Code' => $payAccount],
+                            'Date'    => $docDate,
+                            'Amount'  => round($localPaid, 2),
+                        ]]]);
+                    }
+                } catch (Throwable $pe) {
+                    self::log('push', 'payment', $r['id'], $xid, 'error', 'error', 'Invoice pushed OK but payment failed: ' . $pe->getMessage());
+                }
+            }
+
+            $pdo->prepare(
+                "UPDATE invoices SET xero_id = :x, xero_status = :st, xero_amount_due = :due, xero_synced_at = NOW() WHERE id = :id"
+            )->execute([
+                ':x'   => $xid,
+                ':st'  => $doc['Status'] ?? 'AUTHORISED',
+                ':due' => max(0, (float)($doc['AmountDue'] ?? $r['total']) - $localPaid),
+                ':id'  => $r['id'],
+            ]);
+            self::log('push', 'invoice', $r['id'], $xid, 'create', 'ok', $r['invoice_no'] . ' → ' . $r['cust_name']);
+            return ['ok' => true, 'xero_id' => $xid, 'message' => $r['invoice_no'] . ' pushed to Xero.'];
+        } catch (Throwable $e) {
+            self::log('push', 'invoice', $r['id'], null, 'error', 'error', $e->getMessage());
+            return ['ok' => false, 'message' => $e->getMessage()];
+        }
+    }
+
+    /** Push a single customer row to Xero, returning its ContactID (throws on failure). */
+    private static function pushOneCustomer(array $r): string {
+        $pdo = getDB();
+        $xeroName = ($r['company_name'] ?? '') !== '' ? $r['company_name'] : $r['name'];
+        $payload  = ['Name' => $xeroName];
+        if (($r['email'] ?? '') !== '')  $payload['EmailAddress'] = $r['email'];
+        if (($r['vat_no'] ?? '') !== '') $payload['TaxNumber'] = $r['vat_no'];
+        if (($r['phone'] ?? '') !== '')  $payload['Phones'] = [['PhoneType' => 'DEFAULT', 'PhoneNumber' => $r['phone']]];
+        if (($r['address'] ?? '') !== '') $payload['Addresses'] = [['AddressType' => 'STREET', 'AddressLine1' => mb_substr($r['address'], 0, 500)]];
+        if (!empty($r['xero_id'])) $payload['ContactID'] = $r['xero_id'];
+
+        $saved = XeroClient::post('Contacts', ['Contacts' => [$payload]]);
+        $c = $saved['Contacts'][0] ?? null;
+        if (!$c) throw new RuntimeException('Xero did not return the saved contact');
+        $pdo->prepare("UPDATE customers SET xero_id = :x, xero_synced_at = NOW() WHERE id = :id")
+            ->execute([':x' => $c['ContactID'], ':id' => $r['id']]);
+        self::log('push', 'customer', (int)$r['id'], $c['ContactID'], $r['xero_id'] ? 'update' : 'create', 'ok', $xeroName);
+        return $c['ContactID'];
     }
 
     private static function pullInvoices(array &$s): void {
@@ -389,6 +452,12 @@ class XeroSync
                 // Xero-only invoice → mirror for CRM history
                 if (in_array($status, ['DELETED', 'VOIDED'], true)) {
                     $pdo->prepare("DELETE FROM xero_invoices_mirror WHERE xero_id = :x")->execute([':x' => $xid]);
+                    continue;
+                }
+                // Respect the sync-from cutoff: don't mirror historical Xero invoices
+                $docDate = substr((string)XeroClient::parseDate($doc['DateString'] ?? $doc['Date'] ?? null), 0, 10);
+                $fromDate = self::syncFromDate();
+                if ($fromDate !== '' && $docDate !== '' && $docDate < $fromDate) {
                     continue;
                 }
                 $contactId = $doc['Contact']['ContactID'] ?? null;
@@ -434,11 +503,18 @@ class XeroSync
 
     private static function pushQuotes(array &$s): void {
         $pdo = getDB();
-        $rows = $pdo->query(
-            "SELECT q.* FROM quotes q
-             WHERE q.xero_id IS NULL AND q.status IN ('sent','accepted')
-             ORDER BY q.id ASC LIMIT 50"
-        )->fetchAll();
+        $fromDate = self::syncFromDate();
+        $sql = "SELECT q.* FROM quotes q
+                WHERE q.xero_id IS NULL AND q.status IN ('sent','accepted')";
+        $params = [];
+        if ($fromDate !== '') {
+            $sql .= " AND DATE(q.created_at) >= :fromdate";
+            $params[':fromdate'] = $fromDate;
+        }
+        $sql .= " ORDER BY q.id ASC LIMIT 50";
+        $qStmt = $pdo->prepare($sql);
+        $qStmt->execute($params);
+        $rows = $qStmt->fetchAll();
 
         $accountCode = xeroSetting('xero_account_code', '200');
         $taxType     = xeroSetting('xero_tax_type', 'OUTPUT2');

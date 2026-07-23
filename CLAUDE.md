@@ -201,9 +201,16 @@ built on the portal's own tables (no staging copies), ported from the SageSync p
   ACCREC AUTHORISED (discount as negative line, `LineAmountTypes: Exclusive`); voided → VOIDED
   (fails if paid in Xero → status `VOID_FAILED`, no retry); status/AmountDue pulled back;
   sent/accepted quotes push. Optional `xero_payment_account_code` setting pushes POS payments.
-- **Settings keys:** `xero_client_id/secret/redirect_uri/scopes/tenant_id/account_code/tax_type/payment_account_code`.
-  SA tax type = `OUTPUT2` (15%); Demo Company (Global) uses `OUTPUT`.
-- Sync is manual via Admin → Xero Sync → "Sync Now". CRM shows live Xero balance for pushed invoices.
+- **Settings keys:** `xero_client_id/secret/redirect_uri/scopes/tenant_id/account_code/tax_type/payment_account_code`;
+  sync control: `xero_sync_enabled`, `xero_sync_direction` (both/push/pull), `xero_sync_from_date` (cutoff — invoices/quotes
+  before it are never pushed or mirrored), `xero_sync_customers`/`xero_sync_invoices`/`xero_sync_quotes` (per-entity on/off;
+  invoices default OFF so they're pushed one-by-one). SA tax type = `OUTPUT2` (15%); Demo Company (Global) uses `OUTPUT`.
+- **Scopes gotcha:** `accounting.transactions` was RETIRED by Xero for apps registered after 2 Mar 2026 → `invalid_scope`
+  at connect. Use `accounting.invoices` (also covers Quotes) + `accounting.contacts` + `accounting.settings`. admin/xero.php
+  auto-heals any saved scope still containing the retired value.
+- Sync runs via Admin → Xero Sync → "Sync Now" (honours the switches). Individual invoices push on demand via the
+  ⬆ Push button in the Xero column on `pos/invoices.php` (admin only) → `XeroSync::pushSingleInvoice($id)`.
+  CRM shows live Xero balance for pushed invoices.
 
 ## Navigation
 

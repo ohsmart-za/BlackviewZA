@@ -16,6 +16,16 @@ $pdo       = getDB();
 $pageTitle = 'Xero Sync';
 $summary   = null;
 
+// Auto-heal the retired 'accounting.transactions' scope (retired by Xero for apps
+// registered after 2 Mar 2026 — causes "invalid_scope"). Upgrade to granular scopes.
+$savedScopes = xeroSetting('xero_scopes', '');
+if ($savedScopes !== '' && strpos($savedScopes, 'accounting.transactions') !== false) {
+    saveSettings($pdo, ['xero_scopes' => XeroClient::DEFAULT_SCOPES]);
+    setFlash('info', 'Updated Xero scopes — the old "accounting.transactions" scope was retired by Xero. Please reconnect.');
+    header('Location: ' . BASE_URL . '/admin/xero.php');
+    exit;
+}
+
 // ============================================================
 // POST actions
 // ============================================================
@@ -66,13 +76,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $enabled   = isset($_POST['sync_enabled']) ? '1' : '0';
         $direction = in_array($_POST['sync_direction'] ?? '', ['both','push','pull'], true)
                      ? $_POST['sync_direction'] : 'both';
+        $fromDate  = preg_match('/^\d{4}-\d{2}-\d{2}$/', $_POST['sync_from_date'] ?? '')
+                     ? $_POST['sync_from_date'] : '';
         saveSettings($pdo, [
             'xero_sync_enabled'   => $enabled,
             'xero_sync_direction' => $direction,
+            'xero_sync_from_date' => $fromDate,
+            'xero_sync_customers' => isset($_POST['sync_customers']) ? '1' : '0',
+            'xero_sync_invoices'  => isset($_POST['sync_invoices'])  ? '1' : '0',
+            'xero_sync_quotes'    => isset($_POST['sync_quotes'])    ? '1' : '0',
         ]);
-        logAudit($pdo, 'xero_sync_mode', 'settings', null, "Sync " . ($enabled === '1' ? 'ON' : 'OFF') . ", direction: $direction");
+        logAudit($pdo, 'xero_sync_mode', 'settings', null,
+            "Sync " . ($enabled === '1' ? 'ON' : 'OFF') . ", dir: $direction, from: " . ($fromDate ?: 'all'));
         setFlash('success', 'Sync mode updated.');
         header('Location: ' . BASE_URL . '/admin/xero.php');
+        exit;
+    }
+
+    if ($action === 'push_invoice' && !empty($_POST['invoice_id'])) {
+        require_once __DIR__ . '/../config/xero_sync.php';
+        $res = XeroSync::pushSingleInvoice((int)$_POST['invoice_id']);
+        logAudit($pdo, 'xero_push_invoice', 'invoices', (int)$_POST['invoice_id'], $res['message'] ?? '');
+        setFlash($res['ok'] ? 'success' : 'error', 'Xero: ' . ($res['message'] ?? ''));
+        $back = $_POST['return'] ?? (BASE_URL . '/admin/xero.php');
+        header('Location: ' . $back);
         exit;
     }
 
@@ -103,6 +130,10 @@ if (!empty($status['connected']) && empty($status['tenant_id'])) {
 $lastSync      = xeroSetting('xero_last_sync_at');
 $syncEnabled   = xeroSetting('xero_sync_enabled', '1') === '1';
 $syncDirection = xeroSetting('xero_sync_direction', 'both');
+$syncFromDate  = xeroSetting('xero_sync_from_date', '');
+$syncCustomers = xeroSetting('xero_sync_customers', '1') === '1';
+$syncInvoices  = xeroSetting('xero_sync_invoices',  '0') === '1';
+$syncQuotes    = xeroSetting('xero_sync_quotes',    '0') === '1';
 
 // Quick counts
 $counts = ['cust_linked' => 0, 'cust_total' => 0, 'inv_pending' => 0, 'inv_linked' => 0, 'mirror' => 0];
@@ -337,6 +368,52 @@ require_once __DIR__ . '/../includes/header.php';
                                onchange="document.getElementById('sync-mode-form').submit()">
                         <span class="xero-slider"></span>
                     </label>
+                </div>
+
+                <!-- What to sync (independent entities) -->
+                <div style="margin-bottom:1.25rem;">
+                    <label class="form-label" style="margin-bottom:.5rem;">What to sync</label>
+                    <div style="display:flex;flex-direction:column;gap:.6rem;">
+                        <?php
+                        $entities = [
+                            'sync_customers' => ['Contacts / Customers', $syncCustomers, 'Sync customer records with Xero contacts.'],
+                            'sync_invoices'  => ['Invoices', $syncInvoices, 'Auto-push finalised invoices in bulk. Leave OFF to push them one-by-one from the invoice list.'],
+                            'sync_quotes'    => ['Quotes', $syncQuotes, 'Push sent/accepted quotes to Xero.'],
+                        ];
+                        foreach ($entities as $field => [$label, $on, $desc]):
+                        ?>
+                        <label style="display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.6rem .85rem;border:1px solid #E5E7EB;border-radius:8px;cursor:pointer;">
+                            <span>
+                                <span style="font-weight:600;font-size:.9rem;"><?= $label ?></span>
+                                <span style="display:block;font-size:.78rem;color:#6B7280;margin-top:.15rem;line-height:1.4;"><?= $desc ?></span>
+                            </span>
+                            <span class="xero-switch" style="width:44px;height:26px;">
+                                <input type="checkbox" name="<?= $field ?>" value="1" <?= $on ? 'checked' : '' ?>
+                                       onchange="document.getElementById('sync-mode-form').submit()">
+                                <span class="xero-slider"></span>
+                            </span>
+                        </label>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <!-- Sync start date -->
+                <div style="margin-bottom:1.25rem;padding:.85rem 1rem;background:#FFFBEB;border:1px solid #FDE68A;border-radius:8px;">
+                    <label class="form-label" style="margin-bottom:.35rem;color:#92400E;">🛡 Only sync invoices dated on/after</label>
+                    <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;">
+                        <input type="date" name="sync_from_date" value="<?= htmlspecialchars($syncFromDate) ?>"
+                               class="form-control" style="max-width:180px;"
+                               onchange="document.getElementById('sync-mode-form').submit()">
+                        <?php if ($syncFromDate): ?>
+                            <button type="submit" name="sync_from_date" value=""
+                                    class="btn btn-sm btn-outline">Clear (sync all dates)</button>
+                        <?php endif; ?>
+                    </div>
+                    <div style="font-size:.78rem;color:#92400E;margin-top:.5rem;line-height:1.5;">
+                        Invoices and quotes dated <strong>before</strong> this date are never pushed to Xero,
+                        and historical Xero invoices before it are never pulled in. Set this to protect the
+                        invoices you already captured manually in Xero. Leave blank to sync everything.
+                    </div>
                 </div>
 
                 <!-- Direction -->

@@ -403,7 +403,20 @@ require_once __DIR__ . '/../includes/header.php';
                                     <span title="Synced to Xero<?= $xStatus ? ' — ' . htmlspecialchars($xStatus) : '' ?>" style="background:#DCFCE7;color:#16A34A;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">✓ Synced</span>
                                 <?php endif;
                             elseif (($inv['status'] ?? 'active') === 'active'): ?>
+                                <?php if (isAdmin()): ?>
+                                <form method="POST" action="<?= BASE_URL ?>/admin/xero.php" style="display:inline;"
+                                      onsubmit="this.querySelector('button').textContent='…';this.querySelector('button').disabled=true;">
+                                    <input type="hidden" name="action" value="push_invoice">
+                                    <input type="hidden" name="invoice_id" value="<?= (int)$inv['id'] ?>">
+                                    <input type="hidden" name="return" value="<?= htmlspecialchars(BASE_URL . '/pos/invoices.php?' . $_SERVER['QUERY_STRING']) ?>">
+                                    <button type="submit" title="Click to push this invoice to Xero now"
+                                            style="background:#FEF3C7;color:#92400E;padding:.15rem .55rem;border:1px solid #FDE68A;border-radius:12px;font-size:.72rem;font-weight:600;cursor:pointer;">
+                                        ⬆ Push
+                                    </button>
+                                </form>
+                                <?php else: ?>
                                 <span title="Finalised — will push to Xero on next sync" style="background:#FEF3C7;color:#92400E;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">Pending</span>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <span title="Drafts and voided invoices aren't pushed" style="color:#9CA3AF;font-size:.75rem;">—</span>
                             <?php endif; ?>

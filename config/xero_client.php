@@ -30,7 +30,9 @@ class XeroClient
     const TOKEN_URL       = 'https://identity.xero.com/connect/token';
     const API_BASE        = 'https://api.xero.com/api.xro/2.0';
     const CONNECTIONS_URL = 'https://api.xero.com/connections';
-    const DEFAULT_SCOPES  = 'openid profile email accounting.transactions accounting.contacts offline_access';
+    // NB: accounting.transactions was retired for Xero apps registered after 2 Mar 2026.
+    // accounting.invoices is its granular replacement and also covers Quotes.
+    const DEFAULT_SCOPES  = 'openid profile email accounting.contacts accounting.invoices accounting.settings offline_access';
 
     /** GET an endpoint like 'Contacts'. Returns the decoded body (e.g. {"Contacts":[...]}). */
     public static function get(string $endpoint, array $query = []): array {
