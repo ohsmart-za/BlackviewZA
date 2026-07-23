@@ -154,7 +154,7 @@ try {
     $stmt = $pdo->prepare(
         "SELECT c.id, c.name, c.email, c.phone, c.contact_type,
                 COALESCE(c.company_name,'') AS company_name,
-                c.created_at,
+                c.created_at, c.xero_id,
                 COUNT(DISTINCT inv.id)      AS invoice_count,
                 COALESCE(SUM(inv.total), 0) AS total_spend,
                 MAX(inv.created_at)         AS last_invoice
@@ -168,9 +168,11 @@ try {
 } catch (Throwable $e) {
     $hasColumns = false;
     try {
+        // Fallback without xero_id (migration_023 not run) and without CRM columns
         $stmt = $pdo->prepare(
             "SELECT c.id, c.name, c.email, c.phone,
                     'individual' AS contact_type, '' AS company_name, c.created_at,
+                    NULL AS xero_id,
                     COUNT(DISTINCT inv.id) AS invoice_count,
                     COALESCE(SUM(inv.total),0) AS total_spend, MAX(inv.created_at) AS last_invoice
              FROM customers c LEFT JOIN invoices inv ON inv.customer_id = c.id
@@ -181,6 +183,12 @@ try {
         $customers = $stmt->fetchAll();
     } catch (Throwable $e2) {}
 }
+
+// Is Xero connected? (controls whether we show the Sync column meaningfully)
+$xeroConnected = false;
+try {
+    $xeroConnected = (bool)$pdo->query("SELECT 1 FROM xero_oauth_tokens WHERE id=1 AND refresh_token IS NOT NULL")->fetchColumn();
+} catch (Throwable $e) { /* table not migrated */ }
 
 // Re-open edit modal on error
 $reopenEditId = 0;
@@ -256,12 +264,13 @@ require_once __DIR__ . '/../includes/header.php';
                     <th>Last Invoice</th>
                     <th style="text-align:right;">Total Spend</th>
                     <th style="text-align:center;">#&nbsp;Inv</th>
+                    <th style="text-align:center;">Xero</th>
                     <th style="width:110px;"></th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($customers)): ?>
-                <tr><td colspan="9" style="text-align:center;color:#9CA3AF;padding:2rem;">
+                <tr><td colspan="10" style="text-align:center;color:#9CA3AF;padding:2rem;">
                     No customers found. <?= $search ? 'Try a different search.' : 'Click <strong>+ Add Customer</strong> to get started.' ?>
                 </td></tr>
                 <?php else: foreach ($customers as $c): ?>
@@ -281,6 +290,13 @@ require_once __DIR__ . '/../includes/header.php';
                     <td style="font-size:.9rem;color:#6B7280;"><?= $c['last_invoice'] ? date('d M Y', strtotime($c['last_invoice'])) : '—' ?></td>
                     <td style="text-align:right;font-weight:600;">R <?= number_format((float)$c['total_spend'], 2) ?></td>
                     <td style="text-align:center;color:#6B7280;"><?= (int)$c['invoice_count'] ?></td>
+                    <td style="text-align:center;">
+                        <?php if (!empty($c['xero_id'])): ?>
+                            <span title="Synced to Xero" style="background:#DCFCE7;color:#16A34A;padding:.15rem .5rem;border-radius:12px;font-size:.75rem;font-weight:600;white-space:nowrap;">✓ Synced</span>
+                        <?php else: ?>
+                            <span title="Not yet on Xero — will sync on next run" style="background:#FEF3C7;color:#92400E;padding:.15rem .5rem;border-radius:12px;font-size:.75rem;font-weight:600;white-space:nowrap;">Pending</span>
+                        <?php endif; ?>
+                    </td>
                     <td class="action-btns" onclick="event.stopPropagation()">
                         <a href="<?= BASE_URL ?>/pos/index.php?crm_customer_id=<?= $c['id'] ?>"
                            class="btn btn-sm btn-outline">New Invoice</a>

@@ -109,11 +109,22 @@ $posTotStmt = $pdo->prepare(
 $posTotStmt->execute($posParams);
 $posTotals = $posTotStmt->fetch();
 
+// Detect Xero columns once (migration_023) so we can show a sync column
+$hasXeroCols = false;
+try {
+    $pdo->query("SELECT xero_id FROM invoices LIMIT 1");
+    $hasXeroCols = true;
+} catch (Throwable $e) { /* migration_023 not run — hide Xero column */ }
+
+$xeroSelect = $hasXeroCols
+    ? "inv.xero_id, inv.xero_status, COALESCE(inv.status,'active') AS status,"
+    : "NULL AS xero_id, NULL AS xero_status, COALESCE(inv.status,'active') AS status,";
+
 // Fetch page of invoices
 $posInvStmt = $pdo->prepare(
     "SELECT inv.id, inv.invoice_no, inv.channel, inv.payment_method,
             inv.subtotal, inv.vat_amount, inv.total, inv.created_at,
-            COALESCE(inv.status,'active') AS status,
+            $xeroSelect
             c.name AS customer_name,
             (SELECT COUNT(*) FROM invoice_items ii WHERE ii.invoice_id = inv.id) AS item_count,
             COALESCE((SELECT SUM(ip.amount) FROM invoice_payments ip WHERE ip.invoice_id = inv.id), 0) AS total_paid,
@@ -126,6 +137,14 @@ $posInvStmt = $pdo->prepare(
 );
 $posInvStmt->execute($posParams);
 $posInvoices = $posInvStmt->fetchAll();
+
+// Is Xero connected? (only show "Sync" column when it's actually in use)
+$xeroConnected = false;
+if ($hasXeroCols) {
+    try {
+        $xeroConnected = (bool)$pdo->query("SELECT 1 FROM xero_oauth_tokens WHERE id=1 AND refresh_token IS NOT NULL")->fetchColumn();
+    } catch (Throwable $e) { /* not migrated */ }
+}
 
 // ============================================================
 // Take-Out Movements — filters & query
@@ -320,6 +339,7 @@ require_once __DIR__ . '/../includes/header.php';
                         <th class="text-right">Items</th>
                         <th class="text-right">Total (incl. VAT)</th>
                         <th class="text-right">Balance</th>
+                        <?php if ($xeroConnected): ?><th class="text-center">Xero</th><?php endif; ?>
                     </tr>
                 </thead>
                 <tbody>
@@ -370,11 +390,30 @@ require_once __DIR__ . '/../includes/header.php';
                                 <span style="color:var(--color-muted);font-size:.75rem;">outstanding</span>
                             <?php endif; ?>
                         </td>
+                        <?php if ($xeroConnected): ?>
+                        <td class="text-center" onclick="event.stopPropagation()" style="white-space:nowrap;">
+                            <?php
+                            $xStatus = strtoupper((string)($inv['xero_status'] ?? ''));
+                            if (!empty($inv['xero_id'])):
+                                if (in_array($xStatus, ['VOIDED','DELETED'], true)): ?>
+                                    <span title="Voided in Xero" style="background:#F3F4F6;color:#6B7280;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">Voided</span>
+                                <?php elseif ($xStatus === 'VOID_FAILED'): ?>
+                                    <span title="Void failed in Xero — has payments there; void it manually in Xero" style="background:#FEF2F2;color:#DC2626;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">Void failed</span>
+                                <?php else: ?>
+                                    <span title="Synced to Xero<?= $xStatus ? ' — ' . htmlspecialchars($xStatus) : '' ?>" style="background:#DCFCE7;color:#16A34A;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">✓ Synced</span>
+                                <?php endif;
+                            elseif (($inv['status'] ?? 'active') === 'active'): ?>
+                                <span title="Finalised — will push to Xero on next sync" style="background:#FEF3C7;color:#92400E;padding:.15rem .5rem;border-radius:12px;font-size:.72rem;font-weight:600;">Pending</span>
+                            <?php else: ?>
+                                <span title="Drafts and voided invoices aren't pushed" style="color:#9CA3AF;font-size:.75rem;">—</span>
+                            <?php endif; ?>
+                        </td>
+                        <?php endif; ?>
                     </tr>
                     <?php endforeach; ?>
                     <?php if (empty($posInvoices)): ?>
                     <tr>
-                        <td colspan="8" style="text-align:center;color:var(--color-muted);padding:2rem;">
+                        <td colspan="<?= $xeroConnected ? 9 : 8 ?>" style="text-align:center;color:var(--color-muted);padding:2rem;">
                             No invoices found for the selected filters.
                         </td>
                     </tr>
@@ -401,6 +440,7 @@ require_once __DIR__ . '/../includes/header.php';
                                 <span style="color:#16A34A;">All paid</span>
                             <?php endif; ?>
                         </td>
+                        <?php if ($xeroConnected): ?><td></td><?php endif; ?>
                     </tr>
                 </tfoot>
                 <?php endif; ?>
