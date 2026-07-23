@@ -323,13 +323,20 @@ class XeroSync
                 $desc = $ln['product_name'] ?: 'Item';
                 if (!empty($ln['sku']))       $desc .= ' (' . $ln['sku'] . ')';
                 if (!empty($ln['serial_no'])) $desc .= ' — SN: ' . $ln['serial_no'];
-                $lineItems[] = [
+                $line = [
                     'Description' => $desc,
                     'Quantity'    => (float)($ln['qty'] ?? 1),
                     'UnitAmount'  => (float)$ln['unit_price'],
                     'AccountCode' => $accountCode,
                     'TaxType'     => $taxType,
                 ];
+                // Attach the Xero Item code so the Item column is populated and
+                // (if the item is tracked in Xero) inventory is deducted.
+                $sku = trim($ln['sku'] ?? '');
+                if ($sku !== '' && self::ensureXeroItem($sku, $ln['product_name'] ?: $sku, $accountCode, $taxType)) {
+                    $line['ItemCode'] = mb_substr($sku, 0, 30);
+                }
+                $lineItems[] = $line;
             }
             if ((float)($r['discount_amount'] ?? 0) > 0) {
                 $lineItems[] = [
@@ -394,6 +401,41 @@ class XeroSync
             self::log('push', 'invoice', $r['id'], null, 'error', 'error', $e->getMessage());
             return ['ok' => false, 'message' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Ensure a product exists as a Xero Item (upsert by Code=SKU) so invoice lines
+     * can reference ItemCode → populates the Item column and lets Xero track
+     * inventory. Non-fatal: returns false on any error (invoice still pushes without it).
+     */
+    private static $ensuredItems = [];
+    private static function ensureXeroItem(string $sku, string $name, string $accountCode, string $taxType): bool {
+        $sku = trim($sku);
+        if ($sku === '') return false;
+        if (isset(self::$ensuredItems[$sku])) return self::$ensuredItems[$sku];
+        try {
+            $item = [
+                'Code'   => mb_substr($sku, 0, 30),
+                'Name'   => mb_substr($name !== '' ? $name : $sku, 0, 50), // Xero Item Name max 50 chars
+                'IsSold' => true,
+                'SalesDetails' => array_filter([
+                    'AccountCode' => $accountCode ?: null,
+                    'TaxType'     => $taxType ?: null,
+                ], fn($v) => $v !== null),
+            ];
+            XeroClient::post('Items', ['Items' => [$item]]);
+            self::$ensuredItems[$sku] = true;
+        } catch (Throwable $e) {
+            // Item may already exist as a tracked inventory item (can't overwrite some fields) —
+            // still reference it by code in that case; only skip if the code truly can't be used.
+            $msg = $e->getMessage();
+            $stillUsable = stripos($msg, 'already') !== false || stripos($msg, 'tracked') !== false;
+            self::$ensuredItems[$sku] = $stillUsable;
+            if (!$stillUsable) {
+                self::log('push', 'item', null, null, 'error', 'error', "Item '$sku': $msg");
+            }
+        }
+        return self::$ensuredItems[$sku];
     }
 
     /** Push a single customer row to Xero, returning its ContactID (throws on failure). */

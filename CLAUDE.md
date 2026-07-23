@@ -211,6 +211,14 @@ built on the portal's own tables (no staging copies), ported from the SageSync p
 - Sync runs via Admin → Xero Sync → "Sync Now" (honours the switches). Individual invoices push on demand via the
   ⬆ Push button in the Xero column on `pos/invoices.php` (admin only) → `XeroSync::pushSingleInvoice($id)`.
   CRM shows live Xero balance for pushed invoices.
+- **Account/tax codes must be picked from the org, not guessed.** Admin → Xero Sync → "Load accounts & tax rates from
+  Xero" (`refresh_meta`) caches Accounts + TaxRates as JSON settings; the Sales Account / Tax Rate / Payment Account
+  fields become dropdowns. `OUTPUT2` is NOT universally 15% — in this org it's the old 14% rate, so the tax type MUST be
+  chosen from the fetched list (Standard Rate Sales 15%). Payment account (bank/cash, "Enable payments" in Xero) must be
+  set for POS payments to push so paid invoices show Amount Due 0 in Xero — else they sit unpaid.
+- **Inventory:** invoice lines send `ItemCode` = product SKU; `ensureXeroItem()` upserts each SKU as a Xero Item first
+  (Name max 50 chars) so the Item column populates and tracked items deduct stock. Non-fatal — invoice still pushes if the
+  item upsert fails.
 
 ## Navigation
 

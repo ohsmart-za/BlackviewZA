@@ -103,6 +103,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'refresh_meta') {
+        try {
+            $accts = XeroClient::get('Accounts')['Accounts'] ?? [];
+            $rates = XeroClient::get('TaxRates')['TaxRates'] ?? [];
+            saveSettings($pdo, [
+                'xero_accounts_json'  => json_encode($accts),
+                'xero_taxrates_json'  => json_encode($rates),
+                'xero_meta_fetched_at'=> date('Y-m-d H:i:s'),
+            ]);
+            setFlash('success', 'Loaded ' . count($accts) . ' accounts and ' . count($rates) . ' tax rates from Xero. Now pick the correct ones below.');
+        } catch (Throwable $e) {
+            setFlash('error', 'Could not load from Xero: ' . $e->getMessage());
+        }
+        header('Location: ' . BASE_URL . '/admin/xero.php');
+        exit;
+    }
+
     if ($action === 'sync_now') {
         require_once __DIR__ . '/../config/xero_sync.php';
         try {
@@ -134,6 +151,28 @@ $syncFromDate  = xeroSetting('xero_sync_from_date', '');
 $syncCustomers = xeroSetting('xero_sync_customers', '1') === '1';
 $syncInvoices  = xeroSetting('xero_sync_invoices',  '0') === '1';
 $syncQuotes    = xeroSetting('xero_sync_quotes',    '0') === '1';
+
+// Cached Xero accounts + tax rates (fetched via "Load from Xero")
+$xeroAccounts  = json_decode(xeroSetting('xero_accounts_json', '[]'), true) ?: [];
+$xeroTaxRates  = json_decode(xeroSetting('xero_taxrates_json', '[]'), true) ?: [];
+$metaFetchedAt = xeroSetting('xero_meta_fetched_at', '');
+
+// Split accounts into sales (revenue) and payment-enabled (bank/asset)
+$salesAccounts   = [];
+$paymentAccounts = [];
+foreach ($xeroAccounts as $a) {
+    $cls  = strtoupper($a['Class'] ?? '');
+    $type = strtoupper($a['Type'] ?? '');
+    if ($cls === 'REVENUE' || in_array($type, ['REVENUE','SALES','OTHERINCOME'], true)) {
+        $salesAccounts[] = $a;
+    }
+    if (!empty($a['EnablePaymentsToAccount']) || $cls === 'ASSET' || $type === 'BANK') {
+        $paymentAccounts[] = $a;
+    }
+}
+$curAccount    = xeroSetting('xero_account_code', '200');
+$curTaxType    = xeroSetting('xero_tax_type', 'OUTPUT2');
+$curPayAccount = xeroSetting('xero_payment_account_code', '');
 
 // Quick counts
 $counts = ['cust_linked' => 0, 'cust_total' => 0, 'inv_pending' => 0, 'inv_linked' => 0, 'mirror' => 0];
@@ -316,31 +355,85 @@ require_once __DIR__ . '/../includes/header.php';
 
                 <hr style="border:none;border-top:1px solid #E5E7EB;margin:1rem 0;">
 
+                <?php if (empty($xeroTaxRates) && !empty($status['connected'])): ?>
+                <div class="alert alert-warning" style="margin-bottom:1rem;">
+                    ⚠ Click <strong>Load from Xero</strong> below to fetch your real accounts and tax rates,
+                    then pick the correct 15% sales tax rate — otherwise invoices push with the wrong tax code.
+                </div>
+                <?php endif; ?>
+
                 <div class="form-group">
-                    <label class="form-label">Sales Account Code</label>
+                    <label class="form-label">Sales Account</label>
+                    <?php if (!empty($salesAccounts)): ?>
+                    <select name="xero_account_code" class="form-control">
+                        <?php foreach ($salesAccounts as $a): ?>
+                        <option value="<?= htmlspecialchars($a['Code']) ?>" <?= $curAccount === ($a['Code'] ?? '') ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($a['Code'] . ' — ' . ($a['Name'] ?? '')) ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <?php else: ?>
                     <input type="text" name="xero_account_code" class="form-control" style="max-width:120px;"
-                           value="<?= htmlspecialchars(xeroSetting('xero_account_code', '200')) ?>">
-                    <small class="form-hint">Xero chart-of-accounts code for sales lines (default 200 = Sales).</small>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Tax Type</label>
-                    <input type="text" name="xero_tax_type" class="form-control" style="max-width:160px;"
-                           value="<?= htmlspecialchars(xeroSetting('xero_tax_type', 'OUTPUT2')) ?>">
-                    <small class="form-hint">SA orgs: <code>OUTPUT2</code> = 15% VAT on income. Demo Company (Global) uses <code>OUTPUT</code>.</small>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Payment Account Code <span style="color:#9CA3AF;font-weight:400;">(optional)</span></label>
-                    <input type="text" name="xero_payment_account_code" class="form-control" style="max-width:120px;"
-                           value="<?= htmlspecialchars(xeroSetting('xero_payment_account_code')) ?>">
-                    <small class="form-hint">If set (e.g. a bank/undeposited-funds account code with "Enable payments" ticked in Xero),
-                        POS payments are pushed with each invoice so cash sales show as paid in Xero.
-                        Leave blank to reconcile payments from the bank feed instead.</small>
+                           value="<?= htmlspecialchars($curAccount) ?>">
+                    <small class="form-hint">Chart-of-accounts code for sales lines (default 200 = Sales).</small>
+                    <?php endif; ?>
                 </div>
 
-                <div class="form-actions">
+                <div class="form-group">
+                    <label class="form-label">Tax Rate</label>
+                    <?php if (!empty($xeroTaxRates)): ?>
+                    <select name="xero_tax_type" class="form-control">
+                        <?php foreach ($xeroTaxRates as $t):
+                            if (($t['Status'] ?? 'ACTIVE') !== 'ACTIVE') continue;
+                            $tt = $t['TaxType'] ?? '';
+                            $rate = isset($t['EffectiveRate']) ? ' (' . rtrim(rtrim(number_format((float)$t['EffectiveRate'],2),'0'),'.') . '%)' : '';
+                        ?>
+                        <option value="<?= htmlspecialchars($tt) ?>" <?= $curTaxType === $tt ? 'selected' : '' ?>>
+                            <?= htmlspecialchars(($t['Name'] ?? $tt) . $rate) ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <small class="form-hint">Pick <strong>Standard Rate Sales (15%)</strong> — not the old 14% rate.</small>
+                    <?php else: ?>
+                    <input type="text" name="xero_tax_type" class="form-control" style="max-width:160px;"
+                           value="<?= htmlspecialchars($curTaxType) ?>">
+                    <small class="form-hint">Load from Xero to pick the right one. <code>OUTPUT2</code> is NOT always 15% — in some orgs it's the old 14% rate.</small>
+                    <?php endif; ?>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Payment Account <span style="color:#9CA3AF;font-weight:400;">(for marking invoices paid)</span></label>
+                    <?php if (!empty($paymentAccounts)): ?>
+                    <select name="xero_payment_account_code" class="form-control">
+                        <option value="">— Don't push payments (reconcile via bank feed) —</option>
+                        <?php foreach ($paymentAccounts as $a): ?>
+                        <option value="<?= htmlspecialchars($a['Code']) ?>" <?= $curPayAccount === ($a['Code'] ?? '') ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($a['Code'] . ' — ' . ($a['Name'] ?? '')) ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <small class="form-hint">Pick the bank/cash account POS payments land in. Set this so paid invoices show <strong>Amount due 0.00</strong> in Xero.</small>
+                    <?php else: ?>
+                    <input type="text" name="xero_payment_account_code" class="form-control" style="max-width:120px;"
+                           value="<?= htmlspecialchars($curPayAccount) ?>">
+                    <small class="form-hint">A bank/cash account code with "Enable payments" ticked in Xero. Load from Xero to pick it. Blank = don't push payments.</small>
+                    <?php endif; ?>
+                </div>
+
+                <div class="form-actions" style="display:flex;gap:.6rem;align-items:center;">
                     <button type="submit" class="btn btn-primary">Save Settings</button>
                 </div>
             </form>
+
+            <?php if (!empty($status['connected'])): ?>
+            <form method="POST" action="" style="margin-top:.75rem;">
+                <input type="hidden" name="action" value="refresh_meta">
+                <button type="submit" class="btn btn-outline btn-sm">🔄 Load accounts &amp; tax rates from Xero</button>
+                <?php if ($metaFetchedAt): ?>
+                    <span style="font-size:.78rem;color:#9CA3AF;margin-left:.5rem;">last loaded <?= htmlspecialchars($metaFetchedAt) ?></span>
+                <?php endif; ?>
+            </form>
+            <?php endif; ?>
         </div>
     </div>
 </div>
