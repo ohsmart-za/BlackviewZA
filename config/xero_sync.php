@@ -30,12 +30,26 @@ class XeroSync
             'pushed_invoices'  => 0, 'pulled_invoices'  => 0, 'mirrored_invoices' => 0,
             'pushed_quotes'    => 0,
             'errors'           => 0,
+            'direction'        => xeroSetting('xero_sync_direction', 'both'),
         ];
-        self::pushCustomers($s);
-        self::pullContacts($s);
-        self::pushInvoices($s);
-        self::pullInvoices($s);
-        self::pushQuotes($s);
+
+        // Master on/off switch
+        if (xeroSetting('xero_sync_enabled', '1') !== '1') {
+            $s['skipped'] = 'Sync is switched OFF.';
+            return $s;
+        }
+
+        // Direction: 'both' = two-way merge, 'push' = portal→Xero only, 'pull' = Xero→portal only
+        $dir  = $s['direction'];
+        $push = ($dir === 'both' || $dir === 'push');
+        $pull = ($dir === 'both' || $dir === 'pull');
+
+        if ($push) self::pushCustomers($s);
+        if ($pull) self::pullContacts($s);
+        if ($push) self::pushInvoices($s);
+        if ($pull) self::pullInvoices($s);
+        if ($push) self::pushQuotes($s);
+
         xeroSaveSetting('xero_last_sync_at', date('Y-m-d H:i:s'));
         return $s;
     }

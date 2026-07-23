@@ -62,9 +62,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'save_sync_mode') {
+        $enabled   = isset($_POST['sync_enabled']) ? '1' : '0';
+        $direction = in_array($_POST['sync_direction'] ?? '', ['both','push','pull'], true)
+                     ? $_POST['sync_direction'] : 'both';
+        saveSettings($pdo, [
+            'xero_sync_enabled'   => $enabled,
+            'xero_sync_direction' => $direction,
+        ]);
+        logAudit($pdo, 'xero_sync_mode', 'settings', null, "Sync " . ($enabled === '1' ? 'ON' : 'OFF') . ", direction: $direction");
+        setFlash('success', 'Sync mode updated.');
+        header('Location: ' . BASE_URL . '/admin/xero.php');
+        exit;
+    }
+
     if ($action === 'sync_now') {
         require_once __DIR__ . '/../config/xero_sync.php';
         try {
+            if (xeroSetting('xero_sync_enabled', '1') !== '1') {
+                throw new RuntimeException('Sync is currently switched OFF. Turn it on in the Sync Control panel first.');
+            }
             set_time_limit(280);
             $summary = XeroSync::run();
             logAudit($pdo, 'xero_sync', 'settings', null, 'Manual sync: ' . json_encode($summary));
@@ -83,7 +100,9 @@ if (!empty($status['connected']) && empty($status['tenant_id'])) {
     try { $tenants = XeroClient::listTenants(); } catch (Throwable $e) { /* token issue — shown below */ }
 }
 
-$lastSync = xeroSetting('xero_last_sync_at');
+$lastSync      = xeroSetting('xero_last_sync_at');
+$syncEnabled   = xeroSetting('xero_sync_enabled', '1') === '1';
+$syncDirection = xeroSetting('xero_sync_direction', 'both');
 
 // Quick counts
 $counts = ['cust_linked' => 0, 'cust_total' => 0, 'inv_pending' => 0, 'inv_linked' => 0, 'mirror' => 0];
@@ -104,6 +123,33 @@ try {
 require_once __DIR__ . '/../includes/header.php';
 ?>
 
+<style>
+/* iOS-style toggle switch */
+.xero-switch { position: relative; display: inline-block; width: 52px; height: 30px; flex-shrink: 0; }
+.xero-switch input { opacity: 0; width: 0; height: 0; }
+.xero-slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background: #CBD5E1; border-radius: 30px; transition: background .2s;
+}
+.xero-slider::before {
+    content: ""; position: absolute; height: 24px; width: 24px; left: 3px; bottom: 3px;
+    background: #fff; border-radius: 50%; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3);
+}
+.xero-switch input:checked + .xero-slider { background: #16A34A; }
+.xero-switch input:checked + .xero-slider::before { transform: translateX(22px); }
+
+/* Direction selector */
+.xero-dir-group { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+.xero-dir-option {
+    display: block; text-align: center; padding: .85rem .6rem; cursor: pointer;
+    border: 2px solid #E5E7EB; border-radius: 10px; transition: border-color .15s, background .15s;
+    position: relative;
+}
+.xero-dir-option:hover { border-color: #93C5FD; background: #F8FAFC; }
+.xero-dir-option.selected { border-color: #2563EB; background: #EFF6FF; }
+@media (max-width: 640px) { .xero-dir-group { grid-template-columns: 1fr; } }
+</style>
+
 <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.75rem;">
     <div>
         <h2 class="page-title">Xero Sync</h2>
@@ -112,14 +158,18 @@ require_once __DIR__ . '/../includes/header.php';
     <?php if (!empty($status['connected']) && !empty($status['tenant_id'])): ?>
     <form method="POST" action="">
         <input type="hidden" name="action" value="sync_now">
-        <button type="submit" class="btn btn-primary">🔄 Sync Now</button>
+        <button type="submit" class="btn btn-primary" <?= $syncEnabled ? '' : 'disabled title="Sync is switched off"' ?>>
+            🔄 Sync Now
+        </button>
     </form>
     <?php endif; ?>
 </div>
 
-<?php if ($summary): ?>
+<?php if ($summary && !empty($summary['skipped'])): ?>
+<div class="alert alert-warning">⏸ <?= htmlspecialchars($summary['skipped']) ?> Turn it on in Sync Control to run.</div>
+<?php elseif ($summary): ?>
 <div class="alert alert-success">
-    ✅ Sync complete —
+    ✅ Sync complete (<?= htmlspecialchars($summary['direction'] === 'push' ? 'push only' : ($summary['direction'] === 'pull' ? 'pull only' : 'both ways')) ?>) —
     Customers: <strong><?= $summary['pushed_customers'] ?> pushed / <?= $summary['pulled_customers'] ?> pulled</strong> ·
     Invoices: <strong><?= $summary['pushed_invoices'] ?> pushed / <?= $summary['pulled_invoices'] ?> updated / <?= $summary['mirrored_invoices'] ?> mirrored</strong> ·
     Quotes: <strong><?= $summary['pushed_quotes'] ?> pushed</strong>
@@ -264,8 +314,64 @@ require_once __DIR__ . '/../includes/header.php';
     </div>
 </div>
 
-<!-- RIGHT: How it works + Log -->
+<!-- RIGHT: Controls + How it works + Log -->
 <div class="col-main">
+
+    <!-- Sync Control: on/off + direction -->
+    <div class="card" style="margin-bottom:1rem;">
+        <div class="card-header"><h3 class="card-title">Sync Control</h3></div>
+        <div class="card-body">
+            <form method="POST" action="" id="sync-mode-form">
+                <input type="hidden" name="action" value="save_sync_mode">
+
+                <!-- Master on/off -->
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.5rem 0 1rem;border-bottom:1px solid #E5E7EB;margin-bottom:1rem;">
+                    <div>
+                        <div style="font-weight:600;font-size:.95rem;">Sync <?= $syncEnabled ? 'Enabled' : 'Disabled' ?></div>
+                        <div style="font-size:.82rem;color:#6B7280;margin-top:.15rem;">
+                            Master switch. When off, no data moves in either direction (the Xero connection stays intact).
+                        </div>
+                    </div>
+                    <label class="xero-switch">
+                        <input type="checkbox" name="sync_enabled" value="1" <?= $syncEnabled ? 'checked' : '' ?>
+                               onchange="document.getElementById('sync-mode-form').submit()">
+                        <span class="xero-slider"></span>
+                    </label>
+                </div>
+
+                <!-- Direction -->
+                <div>
+                    <label class="form-label" style="margin-bottom:.5rem;">Sync Direction</label>
+                    <div class="xero-dir-group">
+                        <?php
+                        $dirs = [
+                            'both' => ['⇄', 'Merge Both Ways', 'Push portal changes to Xero and pull Xero changes back. Local edits win conflicts.'],
+                            'push' => ['⬆', 'Portal → Xero Only', 'Only send portal customers/invoices/quotes to Xero. Never pull.'],
+                            'pull' => ['⬇', 'Xero → Portal Only', 'Only pull Xero contacts/invoices into the portal. Never push.'],
+                        ];
+                        foreach ($dirs as $val => [$icon, $label, $desc]):
+                            $checked = $syncDirection === $val;
+                        ?>
+                        <label class="xero-dir-option <?= $checked ? 'selected' : '' ?>">
+                            <input type="radio" name="sync_direction" value="<?= $val ?>" <?= $checked ? 'checked' : '' ?>
+                                   onchange="document.getElementById('sync-mode-form').submit()"
+                                   style="position:absolute;opacity:0;">
+                            <div style="font-size:1.3rem;line-height:1;"><?= $icon ?></div>
+                            <div style="font-weight:600;font-size:.9rem;margin-top:.35rem;"><?= $label ?></div>
+                            <div style="font-size:.78rem;color:#6B7280;margin-top:.25rem;line-height:1.4;"><?= $desc ?></div>
+                        </label>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <noscript>
+                    <div class="form-actions" style="margin-top:1rem;">
+                        <button type="submit" class="btn btn-primary">Save Sync Mode</button>
+                    </div>
+                </noscript>
+            </form>
+        </div>
+    </div>
 
     <div class="card" style="margin-bottom:1rem;">
         <div class="card-header"><h3 class="card-title">How the sync works</h3></div>
