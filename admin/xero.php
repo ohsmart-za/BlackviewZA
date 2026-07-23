@@ -170,6 +170,28 @@ $syncQuotes    = xeroSetting('xero_sync_quotes',    '0') === '1';
 $xeroAccounts  = json_decode(xeroSetting('xero_accounts_json', '[]'), true) ?: [];
 $xeroTaxRates  = json_decode(xeroSetting('xero_taxrates_json', '[]'), true) ?: [];
 $metaFetchedAt = xeroSetting('xero_meta_fetched_at', '');
+$metaLoadError = '';
+
+// Auto-load accounts + tax rates the first time (so the dropdowns just appear).
+// If it fails on scope, the token predates the accounting.settings grant → reconnect.
+if (empty($xeroTaxRates) && !empty($status['connected']) && !empty($status['tenant_id'])) {
+    try {
+        $accts = XeroClient::get('Accounts')['Accounts'] ?? [];
+        $rates = XeroClient::get('TaxRates')['TaxRates'] ?? [];
+        if (!empty($rates)) {
+            saveSettings($pdo, [
+                'xero_accounts_json'   => json_encode($accts),
+                'xero_taxrates_json'   => json_encode($rates),
+                'xero_meta_fetched_at' => date('Y-m-d H:i:s'),
+            ]);
+            $xeroAccounts  = $accts;
+            $xeroTaxRates  = $rates;
+            $metaFetchedAt = date('Y-m-d H:i:s');
+        }
+    } catch (Throwable $e) {
+        $metaLoadError = $e->getMessage();
+    }
+}
 
 // Split accounts into sales (revenue) and payment-enabled (bank/asset)
 $salesAccounts   = [];
@@ -376,7 +398,16 @@ require_once __DIR__ . '/../includes/header.php';
 
                 <hr style="border:none;border-top:1px solid #E5E7EB;margin:1rem 0;">
 
-                <?php if (empty($xeroTaxRates) && !empty($status['connected'])): ?>
+                <?php if ($metaLoadError !== ''): ?>
+                <div class="alert alert-error" style="margin-bottom:1rem;">
+                    ⚠ Couldn't load accounts/tax rates from Xero:<br>
+                    <span style="font-size:.82rem;"><?= htmlspecialchars($metaLoadError) ?></span>
+                    <?php if (stripos($metaLoadError, 'scope') !== false || stripos($metaLoadError, '403') !== false): ?>
+                    <br><br><strong>This means your Xero connection is missing the "settings" permission.</strong>
+                    Click <strong>Disconnect</strong> then <strong>Connect to Xero</strong> again to re-grant it.
+                    <?php endif; ?>
+                </div>
+                <?php elseif (empty($xeroTaxRates) && !empty($status['connected'])): ?>
                 <div class="alert alert-warning" style="margin-bottom:1rem;">
                     ⚠ Click <strong>Load from Xero</strong> below to fetch your real accounts and tax rates,
                     then pick the correct 15% sales tax rate — otherwise invoices push with the wrong tax code.
