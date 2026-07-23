@@ -229,7 +229,10 @@ class XeroClient
     }
 
     public static function disconnect(): void {
-        getDB()->exec('DELETE FROM xero_oauth_tokens WHERE id = 1');
+        // Null the tokens rather than DELETE — the app DB user has no DELETE grant.
+        // status() reports disconnected when refresh_token IS NULL.
+        getDB()->prepare('UPDATE xero_oauth_tokens SET access_token = NULL, refresh_token = NULL, expires_at = NULL, raw = NULL WHERE id = 1')
+            ->execute();
         xeroSaveSetting('xero_tenant_id', '');
         xeroSaveSetting('xero_tenant_name', '');
     }

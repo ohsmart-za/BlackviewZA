@@ -513,9 +513,12 @@ class XeroSync
                     continue;
                 }
 
-                // Xero-only invoice → mirror for CRM history
+                // Xero-only invoice → mirror for CRM history.
+                // Voided/deleted: mark the mirror row's status (CRM filters these out).
+                // Use UPDATE, not DELETE — the app DB user is granted SELECT/INSERT/UPDATE only.
                 if (in_array($status, ['DELETED', 'VOIDED'], true)) {
-                    $pdo->prepare("DELETE FROM xero_invoices_mirror WHERE xero_id = :x")->execute([':x' => $xid]);
+                    $pdo->prepare("UPDATE xero_invoices_mirror SET status = :st WHERE xero_id = :x")
+                        ->execute([':st' => $status, ':x' => $xid]);
                     continue;
                 }
                 // Respect the sync-from cutoff: don't mirror historical Xero invoices
